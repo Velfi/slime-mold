@@ -1,6 +1,7 @@
 mod agent;
 mod pheromones;
 mod point2;
+mod swapper;
 mod util;
 
 pub use agent::Agent;
@@ -10,6 +11,7 @@ use pixels::{Error, Pixels, SurfaceTexture};
 pub use point2::Point2;
 use rand::prelude::*;
 use std::{cell::RefCell, rc::Rc};
+pub use swapper::Swapper;
 use util::map_range;
 use winit::{
     dpi::LogicalSize,
