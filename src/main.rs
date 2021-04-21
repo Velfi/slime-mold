@@ -23,6 +23,7 @@ use winit_input_helper::WinitInputHelper;
 
 pub const WIDTH: u32 = 800;
 pub const HEIGHT: u32 = 600;
+const AGENT_COUNT: usize = 10000;
 
 struct World {
     agents: Vec<Agent>,
@@ -90,7 +91,7 @@ impl World {
     fn new() -> Self {
         let rng = Rc::new(RefCell::new(thread_rng()));
 
-        let agents: Vec<_> = (0..1000)
+        let agents: Vec<_> = (0..AGENT_COUNT)
             .into_iter()
             .map(|_| {
                 let rng = rng.as_ref();

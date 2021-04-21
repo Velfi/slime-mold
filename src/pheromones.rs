@@ -13,8 +13,8 @@ pub struct Pheromones {
     width: usize,
 }
 
-const DEFAULT_DEPOSITITION_AMOUNT: f64 = 5.0;
-const DEFAULT_DECAY_FACTOR: f64 = DEFAULT_DEPOSITITION_AMOUNT / 400.0;
+const DEFAULT_DEPOSITITION_AMOUNT: f64 = 1.0;
+const DEFAULT_DECAY_FACTOR: f64 = DEFAULT_DEPOSITITION_AMOUNT / 300.0;
 
 impl Pheromones {
     pub fn new(width: usize, height: usize, init_value: f64) -> Self {
@@ -48,9 +48,12 @@ impl Pheromones {
 
         if x >= 0.0 && x < self.width as f64 && y >= 0.0 && y < self.height as f64 {
             let (x, y) = (x as usize, y as usize);
-            let pheromone_value = self.grid.a().get(y, x);
+            let pheromone_value = self.grid.a().get(y, x).clone();
+            let static_value = self._static_gradient.get(y as usize, x as usize).cloned();
 
-            pheromone_value.cloned()
+            pheromone_value
+                .map(|n| static_value.map(|m| n + m))
+                .flatten()
         } else {
             None
         }
