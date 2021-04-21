@@ -6,7 +6,7 @@ mod util;
 
 pub use agent::Agent;
 use log::error;
-use pheromones::Pheromones;
+use pheromones::{generate_circular_static_gradient, Pheromones};
 use pixels::{Error, Pixels, SurfaceTexture};
 pub use point2::Point2;
 use rand::prelude::*;
@@ -115,7 +115,7 @@ impl World {
             HEIGHT as usize,
             0.0,
             true,
-            None,
+            Some(Box::new(generate_circular_static_gradient)),
         )));
 
         Self {

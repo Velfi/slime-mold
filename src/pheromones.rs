@@ -197,7 +197,7 @@ pub trait StaticGradientGenerator {
     fn generate(width: usize, height: usize) -> Grid<f64>;
 }
 
-fn generate_circular_static_gradient(width: usize, height: usize) -> Grid<f64> {
+pub fn generate_circular_static_gradient(width: usize, height: usize) -> Grid<f64> {
     let center_x = width as f64 / 2.0;
     let center_y = height as f64 / 2.0;
     let min_value: f64 = 0.0;
