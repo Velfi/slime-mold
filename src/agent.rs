@@ -65,6 +65,7 @@ impl Agent {
         self.location
     }
 
+    // TODO why don't they fear the edges?
     pub fn sense(&self, pheromones: &Pheromones) -> SensorReading {
         let sensor_l_heading = rotate_by_degrees(self.heading, -self.sensor_angle);
         let sensor_c_heading = self.heading;
@@ -83,15 +84,9 @@ impl Agent {
         // of detail?
         // Also, if a sensor goes out of bounds, it just reads 0.0
         // Maybe it'd be better to wrap the agents (and their sensors) to the other side of the field?
-        let sensor_l_reading = pheromones
-            .get_reading(sensor_l_location.into())
-            .unwrap_or(-1.0);
-        let sensor_c_reading = pheromones
-            .get_reading(sensor_c_location.into())
-            .unwrap_or(-1.0);
-        let sensor_r_reading = pheromones
-            .get_reading(sensor_r_location.into())
-            .unwrap_or(-1.0);
+        let sensor_l_reading = pheromones.get_reading(sensor_l_location).unwrap_or(-1.0);
+        let sensor_c_reading = pheromones.get_reading(sensor_c_location).unwrap_or(-1.0);
+        let sensor_r_reading = pheromones.get_reading(sensor_r_location).unwrap_or(-1.0);
 
         (sensor_l_reading, sensor_c_reading, sensor_r_reading)
     }

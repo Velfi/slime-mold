@@ -9,6 +9,8 @@ pub struct Pheromones {
     decay_factor: f64,
     _deposit_size: f64,
     _diffuse_size: f64,
+    height: usize,
+    width: usize,
 }
 
 const DEFAULT_DEPOSITITION_AMOUNT: f64 = 5.0;
@@ -36,16 +38,22 @@ impl Pheromones {
             depositition_amount: DEFAULT_DEPOSITITION_AMOUNT,
             grid,
             _static_gradient,
+            height,
+            width,
         }
     }
 
-    pub fn get_reading(&self, at_location: Point2<usize>) -> Option<f64> {
-        let pheromone_value = self.grid.a().get(at_location.y(), at_location.x());
-        // let pheromone_gradient_value = self.static_gradient.get(at_location.y(), at_location.x());
+    pub fn get_reading(&self, at_location: Point2<f64>) -> Option<f64> {
+        let (x, y) = (at_location.x().round(), at_location.y().round());
 
-        pheromone_value.map(|pv| *pv)
-        // .map(|pv| pheromone_gradient_value.map(|pgv| pgv + pv))
-        // .flatten()
+        if x >= 0.0 && x < self.width as f64 && y >= 0.0 && y < self.height as f64 {
+            let (x, y) = (x as usize, y as usize);
+            let pheromone_value = self.grid.a().get(y, x);
+
+            pheromone_value.cloned()
+        } else {
+            None
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -212,7 +220,7 @@ mod test {
 
     #[test]
     fn diffuse_does_nothing_to_cell_when_pheromone_count_is_same_as_in_all_neighboring_cells() {
-        let center = Point2::new(1, 1);
+        let center = Point2::new(1.0, 1.0);
         let mut pheromones = Pheromones::new(3, 3, 1.0);
 
         // Assert all cells are 1.0 before the diffuse
@@ -331,10 +339,10 @@ mod test {
     }
     #[test]
     fn diffuse_correctly_handles_corners() {
-        let nw_corner = Point2::new(0, 0);
-        let ne_corner = Point2::new(2, 0);
-        let se_corner = Point2::new(2, 2);
-        let sw_corner = Point2::new(0, 2);
+        let nw_corner = Point2::new(0.0, 0.0);
+        let ne_corner = Point2::new(2.0, 0.0);
+        let se_corner = Point2::new(2.0, 2.0);
+        let sw_corner = Point2::new(0.0, 2.0);
         let expected_pheromone_level_after_diffuse = 4.0 / 9.0;
         let mut pheromones = Pheromones::new(3, 3, 1.0);
 
@@ -388,10 +396,10 @@ mod test {
 
     #[test]
     fn diffuse_correctly_handles_edges() {
-        let n_edge = Point2::new(1, 0);
-        let e_edge = Point2::new(2, 1);
-        let s_edge = Point2::new(1, 2);
-        let w_edge = Point2::new(0, 1);
+        let n_edge = Point2::new(1.0, 0.0);
+        let e_edge = Point2::new(2.0, 1.0);
+        let s_edge = Point2::new(1.0, 2.0);
+        let w_edge = Point2::new(0.0, 1.0);
         let expected_pheromone_level_after_diffuse = 6.0 / 9.0;
         let mut pheromones = Pheromones::new(3, 3, 1.0);
 
