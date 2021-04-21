@@ -4,7 +4,7 @@ use log::debug;
 
 pub struct Pheromones {
     grid: Swapper<Grid<f64>>,
-    static_gradient: Grid<f64>,
+    _static_gradient: Grid<f64>,
     depositition_amount: f64,
     decay_factor: f64,
     _deposit_size: f64,
@@ -19,7 +19,7 @@ impl Pheromones {
         let length = width * height;
         let init_values: Vec<_> = (0..length).map(|_| init_value).collect();
         let grid = Grid::from_vec(init_values, width);
-        let static_gradient = generate_circular_static_gradient(width, height);
+        let _static_gradient = generate_circular_static_gradient(width, height);
 
         debug!(
             "Created new grid with {} rows and {} columns",
@@ -35,17 +35,17 @@ impl Pheromones {
             decay_factor: DEFAULT_DECAY_FACTOR,
             depositition_amount: DEFAULT_DEPOSITITION_AMOUNT,
             grid,
-            static_gradient,
+            _static_gradient,
         }
     }
 
     pub fn get_reading(&self, at_location: Point2<usize>) -> Option<f64> {
         let pheromone_value = self.grid.a().get(at_location.y(), at_location.x());
-        let pheromone_gradient_value = self.static_gradient.get(at_location.y(), at_location.x());
+        // let pheromone_gradient_value = self.static_gradient.get(at_location.y(), at_location.x());
 
-        pheromone_value
-            .map(|pv| pheromone_gradient_value.map(|pgv| pgv + pv))
-            .flatten()
+        pheromone_value.map(|pv| *pv)
+        // .map(|pv| pheromone_gradient_value.map(|pgv| pgv + pv))
+        // .flatten()
     }
 
     pub fn len(&self) -> usize {
@@ -79,36 +79,23 @@ impl Pheromones {
 
         grid_a
             .iter()
-            .zip(grid_ref_iter(rows, cols))
-            .for_each(|(grid_a_value, (row, col))| {
-                *grid_b.get_mut(row, col).unwrap() = [
-                    /* nw neighbor index */ (row.checked_sub(1), col.checked_sub(1)),
-                    /* n  neighbor index */ (row.checked_sub(1), Some(col)),
-                    /* ne neighbor index */ (row.checked_sub(1), col.checked_add(1)),
-                    /* e  neighbor index */ (Some(row), col.checked_add(1)),
-                    /* se neighbor index */ (row.checked_add(1), col.checked_add(1)),
-                    /* s  neighbor index */ (row.checked_add(1), Some(col)),
-                    /* sw neighbor index */ (row.checked_add(1), col.checked_sub(1)),
-                    /* w  neighbor index */ (Some(row), col.checked_sub(1)),
-                ]
-                .iter()
-                .map(|neighbor_rc| -> f64 {
-                    // throw out grid indexes that are outside the grid
-                    match neighbor_rc.to_owned() {
-                        (Some(neighbor_row), Some(neighbor_col))
-                            if neighbor_row < rows && neighbor_col < cols =>
-                        {
-                            *grid_b.get(neighbor_row, neighbor_col).unwrap()
+            .zip(grid_ref_iter(cols, rows))
+            .for_each(|(grid_a_value, (col, row))| {
+                let sum_of_neighboring_values = neighbor_indexes(col, row, cols, rows)
+                    .iter()
+                    .map(|neighbor_rc| -> f64 {
+                        // throw out grid indexes that are outside the grid
+                        match neighbor_rc.to_owned() {
+                            (Some(neighbor_col), Some(neighbor_row)) => {
+                                *grid_a.get(neighbor_row, neighbor_col).unwrap()
+                            }
+                            _ => 0.0,
                         }
-                        _ => 0.0,
-                    }
-                })
-                .fold(*grid_a_value, |mut acc, neighbor_value| {
-                    acc = acc + neighbor_value;
-                    acc = acc / 2.0;
+                    })
+                    .sum::<f64>();
 
-                    acc
-                });
+                *grid_b.get_mut(row, col).expect("invalid grid index") =
+                    (grid_a_value + sum_of_neighboring_values) / 9.0;
             });
 
         self.grid.swap()
@@ -126,10 +113,39 @@ impl Pheromones {
     }
 }
 
-fn grid_ref_iter(rows: usize, cols: usize) -> impl Iterator<Item = (usize, usize)> {
+fn grid_ref_iter(cols: usize, rows: usize) -> impl Iterator<Item = (usize, usize)> {
     (0..rows)
-        .map(move |row| (0..cols).map(move |col| (row, col)))
+        .map(move |row| (0..cols).map(move |col| (col, row)))
         .flatten()
+}
+
+fn neighbor_indexes(
+    col: usize,
+    row: usize,
+    cols: usize,
+    rows: usize,
+) -> [(Option<usize>, Option<usize>); 8] {
+    let rows_check = |row: usize| (row < rows).then(|| row);
+    let cols_check = |col: usize| (col < cols).then(|| col);
+
+    [
+        /* nw neighbor index */ (col.checked_sub(1), row.checked_sub(1)),
+        /* n  neighbor index */ (Some(col), row.checked_sub(1)),
+        /* ne neighbor index */
+        (col.checked_add(1).and_then(cols_check), row.checked_sub(1)),
+        /* e  neighbor index */
+        (col.checked_add(1).and_then(cols_check), Some(row)),
+        /* se neighbor index */
+        (
+            col.checked_add(1).and_then(cols_check),
+            row.checked_add(1).and_then(rows_check),
+        ),
+        /* s  neighbor index */
+        (Some(col), row.checked_add(1).and_then(rows_check)),
+        /* sw neighbor index */
+        (col.checked_sub(1), row.checked_add(1).and_then(rows_check)),
+        /* w  neighbor index */ (col.checked_sub(1), Some(row)),
+    ]
 }
 
 fn generate_circular_static_gradient(width: usize, height: usize) -> Grid<f64> {
@@ -171,4 +187,243 @@ fn generate_circular_static_gradient(width: usize, height: usize) -> Grid<f64> {
     );
 
     Grid::from_vec(vec, width)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn diffuse_does_nothing_when_pheromone_count_is_zero() {
+        let mut pheromones = Pheromones::new(3, 3, 0.0);
+
+        // Assert all cells are zero before the diffuse
+        pheromones
+            .iter()
+            .for_each(|pheromone_value| assert_eq!(*pheromone_value, 0.0));
+
+        pheromones.diffuse();
+
+        // Assert all cells are zero after the diffuse
+        pheromones
+            .iter()
+            .for_each(|pheromone_value| assert_eq!(*pheromone_value, 0.0));
+    }
+
+    #[test]
+    fn diffuse_does_nothing_to_cell_when_pheromone_count_is_same_as_in_all_neighboring_cells() {
+        let center = Point2::new(1, 1);
+        let mut pheromones = Pheromones::new(3, 3, 1.0);
+
+        // Assert all cells are 1.0 before the diffuse
+        pheromones
+            .iter()
+            .for_each(|pheromone_value| assert_eq!(*pheromone_value, 1.0));
+
+        pheromones.diffuse();
+
+        // Assert center cell is 1.0 after the diffuse
+        match pheromones.get_reading(center) {
+            Some(reading) => assert_eq!(reading, 1.0),
+            None => panic!("index ({}, {}) is out of range", center.x(), center.y()),
+        }
+    }
+
+    // zelda has poor spatial reasoning
+    // (0,0) (1,0) (2,0)
+    // (0,1) (1,1) (2,1)
+    // (0,2) (1,2) (2,2)
+
+    #[test]
+    fn neighbor_indexes_for_center_cell() {
+        let expected_nw_index = (Some(0), Some(0));
+        let expected_n_index = (Some(1), Some(0));
+        let expected_ne_index = (Some(2), Some(0));
+        let expected_e_index = (Some(2), Some(1));
+        let expected_se_index = (Some(2), Some(2));
+        let expected_s_index = (Some(1), Some(2));
+        let expected_sw_index = (Some(0), Some(2));
+        let expected_w_index = (Some(0), Some(1));
+        #[rustfmt::skip]
+        let [
+            actual_nw_index,
+            actual_n_index,
+            actual_ne_index,
+            actual_e_index,
+            actual_se_index,
+            actual_s_index,
+            actual_sw_index,
+            actual_w_index
+        ] = neighbor_indexes(1, 1, 3, 3);
+
+        assert_eq!(expected_nw_index, actual_nw_index);
+        assert_eq!(expected_n_index, actual_n_index);
+        assert_eq!(expected_ne_index, actual_ne_index);
+        assert_eq!(expected_e_index, actual_e_index);
+        assert_eq!(expected_se_index, actual_se_index);
+        assert_eq!(expected_s_index, actual_s_index);
+        assert_eq!(expected_sw_index, actual_sw_index);
+        assert_eq!(expected_w_index, actual_w_index);
+    }
+
+    #[test]
+    fn neighbor_indexes_for_corner_cell() {
+        let expected_nw_index = (None, None);
+        let expected_n_index = (Some(0), None);
+        let expected_ne_index = (Some(1), None);
+        let expected_e_index = (Some(1), Some(0));
+        let expected_se_index = (Some(1), Some(1));
+        let expected_s_index = (Some(0), Some(1));
+        let expected_sw_index = (None, Some(1));
+        let expected_w_index = (None, Some(0));
+        #[rustfmt::skip]
+        let [
+            actual_nw_index,
+            actual_n_index,
+            actual_ne_index,
+            actual_e_index,
+            actual_se_index,
+            actual_s_index,
+            actual_sw_index,
+            actual_w_index
+        ] = neighbor_indexes(0, 0, 3, 3);
+
+        assert_eq!(expected_nw_index, actual_nw_index);
+        assert_eq!(expected_n_index, actual_n_index);
+        assert_eq!(expected_ne_index, actual_ne_index);
+        assert_eq!(expected_e_index, actual_e_index);
+        assert_eq!(expected_se_index, actual_se_index);
+        assert_eq!(expected_s_index, actual_s_index);
+        assert_eq!(expected_sw_index, actual_sw_index);
+        assert_eq!(expected_w_index, actual_w_index);
+    }
+
+    #[test]
+    fn neighbor_indexes_for_edge_cell() {
+        let expected_nw_index = (None, Some(0));
+        let expected_n_index = (Some(0), Some(0));
+        let expected_ne_index = (Some(1), Some(0));
+        let expected_e_index = (Some(1), Some(1));
+        let expected_se_index = (Some(1), Some(2));
+        let expected_s_index = (Some(0), Some(2));
+        let expected_sw_index = (None, Some(2));
+        let expected_w_index = (None, Some(1));
+        #[rustfmt::skip]
+        let [
+            actual_nw_index,
+            actual_n_index,
+            actual_ne_index,
+            actual_e_index,
+            actual_se_index,
+            actual_s_index,
+            actual_sw_index,
+            actual_w_index
+        ] = neighbor_indexes(0, 1, 3, 3);
+
+        assert_eq!(expected_nw_index, actual_nw_index);
+        assert_eq!(expected_n_index, actual_n_index);
+        assert_eq!(expected_ne_index, actual_ne_index);
+        assert_eq!(expected_e_index, actual_e_index);
+        assert_eq!(expected_se_index, actual_se_index);
+        assert_eq!(expected_s_index, actual_s_index);
+        assert_eq!(expected_sw_index, actual_sw_index);
+        assert_eq!(expected_w_index, actual_w_index);
+    }
+    #[test]
+    fn diffuse_correctly_handles_corners() {
+        let nw_corner = Point2::new(0, 0);
+        let ne_corner = Point2::new(2, 0);
+        let se_corner = Point2::new(2, 2);
+        let sw_corner = Point2::new(0, 2);
+        let expected_pheromone_level_after_diffuse = 4.0 / 9.0;
+        let mut pheromones = Pheromones::new(3, 3, 1.0);
+
+        // Assert all cells are 1.0 before the diffuse
+        pheromones
+            .iter()
+            .for_each(|pheromone_value| assert_eq!(*pheromone_value, 1.0));
+
+        pheromones.diffuse();
+
+        // Assert edge cells are all equal after the diffuse
+        match (
+            pheromones.get_reading(nw_corner),
+            pheromones.get_reading(ne_corner),
+            pheromones.get_reading(se_corner),
+            pheromones.get_reading(sw_corner),
+        ) {
+            (Some(n_reading), Some(e_reading), Some(s_reading), Some(w_reading)) => {
+                assert_eq!(
+                    (n_reading, e_reading, s_reading, w_reading),
+                    (
+                        expected_pheromone_level_after_diffuse,
+                        expected_pheromone_level_after_diffuse,
+                        expected_pheromone_level_after_diffuse,
+                        expected_pheromone_level_after_diffuse,
+                    )
+                );
+            }
+            (None, _, _, _) => panic!(
+                "nw index ({}, {}) is out of range",
+                nw_corner.x(),
+                nw_corner.y()
+            ),
+            (_, None, _, _) => panic!(
+                "ne index ({}, {}) is out of range",
+                ne_corner.x(),
+                ne_corner.y()
+            ),
+            (_, _, None, _) => panic!(
+                "se index ({}, {}) is out of range",
+                se_corner.x(),
+                se_corner.y()
+            ),
+            (_, _, _, None) => panic!(
+                "sw index ({}, {}) is out of range",
+                sw_corner.x(),
+                sw_corner.y()
+            ),
+        }
+    }
+
+    #[test]
+    fn diffuse_correctly_handles_edges() {
+        let n_edge = Point2::new(1, 0);
+        let e_edge = Point2::new(2, 1);
+        let s_edge = Point2::new(1, 2);
+        let w_edge = Point2::new(0, 1);
+        let expected_pheromone_level_after_diffuse = 6.0 / 9.0;
+        let mut pheromones = Pheromones::new(3, 3, 1.0);
+
+        // Assert all cells are 1.0 before the diffuse
+        pheromones
+            .iter()
+            .for_each(|pheromone_value| assert_eq!(*pheromone_value, 1.0));
+
+        pheromones.diffuse();
+
+        // Assert edge cells are all equal after the diffuse
+        match (
+            pheromones.get_reading(n_edge),
+            pheromones.get_reading(e_edge),
+            pheromones.get_reading(s_edge),
+            pheromones.get_reading(w_edge),
+        ) {
+            (Some(n_reading), Some(e_reading), Some(s_reading), Some(w_reading)) => {
+                assert_eq!(
+                    (n_reading, e_reading, s_reading, w_reading),
+                    (
+                        expected_pheromone_level_after_diffuse,
+                        expected_pheromone_level_after_diffuse,
+                        expected_pheromone_level_after_diffuse,
+                        expected_pheromone_level_after_diffuse
+                    ),
+                );
+            }
+            (None, _, _, _) => panic!("n index ({}, {}) is out of range", n_edge.x(), n_edge.y()),
+            (_, None, _, _) => panic!("e index ({}, {}) is out of range", e_edge.x(), e_edge.y()),
+            (_, _, None, _) => panic!("s index ({}, {}) is out of range", s_edge.x(), s_edge.y()),
+            (_, _, _, None) => panic!("w index ({}, {}) is out of range", w_edge.x(), w_edge.y()),
+        }
+    }
 }

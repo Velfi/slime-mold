@@ -104,7 +104,7 @@ impl World {
                 Agent::builder()
                     .location(location)
                     .heading(heading)
-                    .move_speed(0.0)
+                    .move_speed(1.0)
                     .build()
             })
             .collect();
