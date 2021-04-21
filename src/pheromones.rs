@@ -4,7 +4,10 @@ use log::debug;
 
 pub struct Pheromones {
     grid: Swapper<Grid<f64>>,
-    _static_gradient: Grid<f64>,
+    static_gradient: Option<Grid<f64>>,
+    static_gradient_generator: Option<Box<dyn Fn(usize, usize) -> Grid<f64>>>,
+    enable_static_gradient: bool,
+    enable_dynamic_gradient: bool,
     depositition_amount: f64,
     decay_factor: f64,
     _deposit_size: f64,
@@ -17,11 +20,23 @@ const DEFAULT_DEPOSITITION_AMOUNT: f64 = 1.0;
 const DEFAULT_DECAY_FACTOR: f64 = DEFAULT_DEPOSITITION_AMOUNT / 300.0;
 
 impl Pheromones {
-    pub fn new(width: usize, height: usize, init_value: f64) -> Self {
+    pub fn new(
+        width: usize,
+        height: usize,
+        init_value: f64,
+        enable_dynamic_gradient: bool,
+        static_gradient_generator: Option<Box<dyn Fn(usize, usize) -> Grid<f64>>>,
+    ) -> Self {
         let length = width * height;
         let init_values: Vec<_> = (0..length).map(|_| init_value).collect();
         let grid = Grid::from_vec(init_values, width);
-        let _static_gradient = generate_circular_static_gradient(width, height);
+        let mut static_gradient = None;
+        let mut enable_static_gradient = false;
+
+        if let Some(generator) = &static_gradient_generator {
+            static_gradient = Some(generator(width, height));
+            enable_static_gradient = true;
+        }
 
         debug!(
             "Created new grid with {} rows and {} columns",
@@ -36,8 +51,11 @@ impl Pheromones {
             _diffuse_size: 3.0,
             decay_factor: DEFAULT_DECAY_FACTOR,
             depositition_amount: DEFAULT_DEPOSITITION_AMOUNT,
+            static_gradient_generator,
+            enable_static_gradient,
+            enable_dynamic_gradient,
             grid,
-            _static_gradient,
+            static_gradient,
             height,
             width,
         }
@@ -48,12 +66,28 @@ impl Pheromones {
 
         if x >= 0.0 && x < self.width as f64 && y >= 0.0 && y < self.height as f64 {
             let (x, y) = (x as usize, y as usize);
-            let pheromone_value = self.grid.a().get(y, x).clone();
-            let static_value = self._static_gradient.get(y as usize, x as usize).cloned();
 
-            pheromone_value
-                .map(|n| static_value.map(|m| n + m))
-                .flatten()
+            match (self.enable_dynamic_gradient, self.enable_static_gradient) {
+                (true, true) => {
+                    let pheromone_value = self.grid.a().get(y, x).cloned();
+                    let static_value = self
+                        .static_gradient
+                        .as_ref()
+                        .map(|grid| grid.get(y as usize, x as usize).cloned())
+                        .flatten();
+
+                    pheromone_value
+                        .map(|n| static_value.map(|m| n + m))
+                        .flatten()
+                }
+                (true, false) => self.grid.a().get(y, x).cloned(),
+                (false, true) => self
+                    .static_gradient
+                    .as_ref()
+                    .map(|grid| grid.get(y as usize, x as usize).cloned())
+                    .flatten(),
+                (false, false) => Some(0.0),
+            }
         } else {
             None
         }
@@ -159,6 +193,10 @@ fn neighbor_indexes(
     ]
 }
 
+pub trait StaticGradientGenerator {
+    fn generate(width: usize, height: usize) -> Grid<f64>;
+}
+
 fn generate_circular_static_gradient(width: usize, height: usize) -> Grid<f64> {
     let center_x = width as f64 / 2.0;
     let center_y = height as f64 / 2.0;
@@ -206,7 +244,7 @@ mod test {
 
     #[test]
     fn diffuse_does_nothing_when_pheromone_count_is_zero() {
-        let mut pheromones = Pheromones::new(3, 3, 0.0);
+        let mut pheromones = Pheromones::new(3, 3, 0.0, false, None);
 
         // Assert all cells are zero before the diffuse
         pheromones
@@ -224,7 +262,7 @@ mod test {
     #[test]
     fn diffuse_does_nothing_to_cell_when_pheromone_count_is_same_as_in_all_neighboring_cells() {
         let center = Point2::new(1.0, 1.0);
-        let mut pheromones = Pheromones::new(3, 3, 1.0);
+        let mut pheromones = Pheromones::new(3, 3, 1.0, false, None);
 
         // Assert all cells are 1.0 before the diffuse
         pheromones
@@ -347,7 +385,7 @@ mod test {
         let se_corner = Point2::new(2.0, 2.0);
         let sw_corner = Point2::new(0.0, 2.0);
         let expected_pheromone_level_after_diffuse = 4.0 / 9.0;
-        let mut pheromones = Pheromones::new(3, 3, 1.0);
+        let mut pheromones = Pheromones::new(3, 3, 1.0, false, None);
 
         // Assert all cells are 1.0 before the diffuse
         pheromones
@@ -404,7 +442,7 @@ mod test {
         let s_edge = Point2::new(1.0, 2.0);
         let w_edge = Point2::new(0.0, 1.0);
         let expected_pheromone_level_after_diffuse = 6.0 / 9.0;
-        let mut pheromones = Pheromones::new(3, 3, 1.0);
+        let mut pheromones = Pheromones::new(3, 3, 1.0, false, None);
 
         // Assert all cells are 1.0 before the diffuse
         pheromones

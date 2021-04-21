@@ -24,6 +24,9 @@ pub struct Agent {
     // How quickly the agent can rotate
     #[builder(default = 20.0f64)]
     rotation_speed: f64,
+    // The tendency of agents to move erratically
+    #[builder(default = 0.0f64)]
+    jitter: f64,
 }
 
 impl Agent {
@@ -91,7 +94,12 @@ impl Agent {
         (sensor_l_reading, sensor_c_reading, sensor_r_reading)
     }
 
-    pub fn rotate(&mut self, rotation_in_degrees: f64) {
+    pub fn rotate(&mut self, mut rotation_in_degrees: f64) {
+        // if (self.jitter != 0.0) {
+        //     // Randomly adjust rotation amount
+        //     rotation_in_degrees += jitter;
+        // }
+
         self.heading = rotate_by_degrees(self.heading, rotation_in_degrees);
         trace!("new heading is {}", self.heading);
     }

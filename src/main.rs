@@ -21,9 +21,9 @@ use winit::{
 };
 use winit_input_helper::WinitInputHelper;
 
-pub const WIDTH: u32 = 800;
-pub const HEIGHT: u32 = 600;
-const AGENT_COUNT: usize = 10000;
+pub const WIDTH: u32 = 1000;
+pub const HEIGHT: u32 = 1000;
+const AGENT_COUNT: usize = 1000;
 
 struct World {
     agents: Vec<Agent>,
@@ -105,7 +105,7 @@ impl World {
                 Agent::builder()
                     .location(location)
                     .heading(heading)
-                    .move_speed(1.0)
+                    .move_speed(3.0)
                     .build()
             })
             .collect();
@@ -114,6 +114,8 @@ impl World {
             WIDTH as usize,
             HEIGHT as usize,
             0.0,
+            true,
+            None,
         )));
 
         Self {
