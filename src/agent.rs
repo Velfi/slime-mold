@@ -1,4 +1,4 @@
-use crate::{Pheromones, Point2, HEIGHT, WIDTH};
+use crate::{Pheromones, Point2, DEPOSITION_AMOUNT, HEIGHT, WIDTH};
 use log::trace;
 use num::{Float, NumCast};
 use rand::Rng;
@@ -27,6 +27,10 @@ pub struct Agent {
     // The tendency of agents to move erratically
     #[builder(default = 0.0f64)]
     jitter: f64,
+    #[builder(default)]
+    rng: fastrand::Rng,
+    #[builder(default = DEPOSITION_AMOUNT)]
+    deposition_amount: f64,
 }
 
 impl Agent {
@@ -68,6 +72,10 @@ impl Agent {
         self.location
     }
 
+    pub fn deposition_amount(&self) -> f64 {
+        self.deposition_amount
+    }
+
     // TODO why don't they fear the edges?
     pub fn sense(&self, pheromones: &Pheromones) -> SensorReading {
         let sensor_l_heading = rotate_by_degrees(self.heading, -self.sensor_angle);
@@ -95,10 +103,10 @@ impl Agent {
     }
 
     pub fn rotate(&mut self, mut rotation_in_degrees: f64) {
-        // if (self.jitter != 0.0) {
-        //     // Randomly adjust rotation amount
-        //     rotation_in_degrees += jitter;
-        // }
+        if self.jitter != 0.0 {
+            // Randomly adjust rotation amount
+            rotation_in_degrees += self.jitter * self.rng.f64();
+        }
 
         self.heading = rotate_by_degrees(self.heading, rotation_in_degrees);
         trace!("new heading is {}", self.heading);

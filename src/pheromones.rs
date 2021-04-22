@@ -1,23 +1,18 @@
-use crate::{Agent, Point2, Swapper};
+use crate::{Agent, Point2, Swapper, DECAY_FACTOR};
 use grid::Grid;
 use log::debug;
 
 pub struct Pheromones {
     grid: Swapper<Grid<f64>>,
     static_gradient: Option<Grid<f64>>,
-    static_gradient_generator: Option<Box<dyn Fn(usize, usize) -> Grid<f64>>>,
     enable_static_gradient: bool,
     enable_dynamic_gradient: bool,
-    depositition_amount: f64,
     decay_factor: f64,
     _deposit_size: f64,
     _diffuse_size: f64,
     height: usize,
     width: usize,
 }
-
-const DEFAULT_DEPOSITITION_AMOUNT: f64 = 1.0;
-const DEFAULT_DECAY_FACTOR: f64 = DEFAULT_DEPOSITITION_AMOUNT / 300.0;
 
 impl Pheromones {
     pub fn new(
@@ -49,9 +44,7 @@ impl Pheromones {
         Self {
             _deposit_size: 1.0,
             _diffuse_size: 3.0,
-            decay_factor: DEFAULT_DECAY_FACTOR,
-            depositition_amount: DEFAULT_DEPOSITITION_AMOUNT,
-            static_gradient_generator,
+            decay_factor: DECAY_FACTOR,
             enable_static_gradient,
             enable_dynamic_gradient,
             grid,
@@ -106,7 +99,7 @@ impl Pheromones {
             .get_mut(location_to_deposit.y(), location_to_deposit.x())
         {
             Some(grid_ref) => {
-                *grid_ref = self.depositition_amount;
+                *grid_ref = agent.deposition_amount();
             }
             None => {
                 debug!(
@@ -197,7 +190,7 @@ pub trait StaticGradientGenerator {
     fn generate(width: usize, height: usize) -> Grid<f64>;
 }
 
-pub fn generate_circular_static_gradient(width: usize, height: usize) -> Grid<f64> {
+pub fn _generate_circular_static_gradient(width: usize, height: usize) -> Grid<f64> {
     let center_x = width as f64 / 2.0;
     let center_y = height as f64 / 2.0;
     let min_value: f64 = 0.0;

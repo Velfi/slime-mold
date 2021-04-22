@@ -5,8 +5,9 @@ mod swapper;
 mod util;
 
 pub use agent::Agent;
+use colorgrad::Gradient;
 use log::error;
-use pheromones::{generate_circular_static_gradient, Pheromones};
+use pheromones::Pheromones;
 use pixels::{Error, Pixels, SurfaceTexture};
 pub use point2::Point2;
 use rand::prelude::*;
@@ -23,12 +24,20 @@ use winit_input_helper::WinitInputHelper;
 
 pub const WIDTH: u32 = 1000;
 pub const HEIGHT: u32 = 1000;
-const AGENT_COUNT: usize = 1000;
+pub const AGENT_COUNT: usize = 10000;
+pub const AGENT_JITTER: f64 = 5.0;
+pub const AGENT_SPEED_MIN: f64 = 0.5;
+pub const AGENT_SPEED_MAX: f64 = 1.2;
+pub const AGENT_TURN_SPEED: f64 = 12.0;
+pub const AGENT_POSSIBLE_STARTING_HEADINGS: std::ops::Range<f64> = 0.0..360.0;
+pub const DEPOSITION_AMOUNT: f64 = 1.0;
+pub const DECAY_FACTOR: f64 = DEPOSITION_AMOUNT / 100.0;
 
 struct World {
     agents: Vec<Agent>,
     pheromones: Rc<RefCell<Pheromones>>,
     rng: Rc<RefCell<ThreadRng>>,
+    _gradient: Gradient,
 }
 
 fn main() -> Result<(), Error> {
@@ -93,19 +102,29 @@ impl World {
 
         let agents: Vec<_> = (0..AGENT_COUNT)
             .into_iter()
-            .map(|_| {
+            .map(|i| {
+                let deposition_amount = if i == 0 {
+                    DEPOSITION_AMOUNT * 20.0
+                } else {
+                    DEPOSITION_AMOUNT
+                };
+
                 let rng = rng.as_ref();
                 let rng = &mut *rng.borrow_mut();
+                let move_speed = rng.gen_range(AGENT_SPEED_MIN..AGENT_SPEED_MAX);
 
                 let location = Point2::new(
                     rng.gen_range(0.0..(WIDTH as f64)),
                     rng.gen_range(0.0..(HEIGHT as f64)),
                 );
-                let heading = rng.gen_range(0.0..360.0) as f64;
+                let heading = rng.gen_range(AGENT_POSSIBLE_STARTING_HEADINGS);
                 Agent::builder()
                     .location(location)
                     .heading(heading)
-                    .move_speed(3.0)
+                    .move_speed(move_speed)
+                    .jitter(AGENT_JITTER)
+                    .deposition_amount(deposition_amount)
+                    .rotation_speed(AGENT_TURN_SPEED)
                     .build()
             })
             .collect();
@@ -115,11 +134,14 @@ impl World {
             HEIGHT as usize,
             0.0,
             true,
-            Some(Box::new(generate_circular_static_gradient)),
+            None, // Some(Box::new(generate_circular_static_gradient)),
         )));
+
+        let _gradient = colorgrad::warm();
 
         Self {
             agents,
+            _gradient,
             pheromones,
             rng,
         }
@@ -161,9 +183,10 @@ impl World {
             let pheromone_value = pheromone_value.clamp(0.0, 1.0);
             // map from float to u8
             let pheromone_value = map_range(pheromone_value, 0.0f64, 1.0f64, 0u8, 255u8);
-            let rgba = [pheromone_value, pheromone_value, pheromone_value, 0xff];
+            pixel.copy_from_slice(&[pheromone_value, pheromone_value, pheromone_value, 0xff]);
 
-            pixel.copy_from_slice(&rgba);
+            // let (r, g, b, a) = self.gradient.at(pheromone_value).rgba_u8();
+            // pixel.copy_from_slice(&[r, g, b, a]);
         }
     }
 }
