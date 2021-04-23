@@ -1,4 +1,6 @@
 mod agent;
+mod errors;
+mod midi;
 mod pheromones;
 mod point2;
 mod swapper;
@@ -6,9 +8,11 @@ mod util;
 
 pub use agent::Agent;
 use colorgrad::Gradient;
-use log::error;
+use errors::SlimeError;
+use log::{error, info};
+use midi::MidiInterface;
 use pheromones::Pheromones;
-use pixels::{Error, Pixels, SurfaceTexture};
+use pixels::{Pixels, SurfaceTexture};
 pub use point2::Point2;
 use rand::prelude::*;
 use std::{cell::RefCell, rc::Rc};
@@ -24,8 +28,8 @@ use winit_input_helper::WinitInputHelper;
 
 pub const WIDTH: u32 = 1000;
 pub const HEIGHT: u32 = 1000;
-pub const AGENT_COUNT: usize = 10000;
-pub const AGENT_JITTER: f64 = 5.0;
+pub const AGENT_COUNT: usize = 1000;
+pub const AGENT_JITTER: f64 = 10.0;
 pub const AGENT_SPEED_MIN: f64 = 0.5;
 pub const AGENT_SPEED_MAX: f64 = 1.2;
 pub const AGENT_TURN_SPEED: f64 = 12.0;
@@ -40,8 +44,9 @@ struct World {
     _gradient: Gradient,
 }
 
-fn main() -> Result<(), Error> {
+fn main() -> Result<(), SlimeError> {
     env_logger::init();
+
     let event_loop = EventLoop::new();
     let mut input = WinitInputHelper::new();
     let window = {
@@ -59,6 +64,9 @@ fn main() -> Result<(), Error> {
         let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
         Pixels::new(WIDTH, HEIGHT, surface_texture)?
     };
+    let mut midi_interface = MidiInterface::new(None)?;
+    midi_interface.open()?;
+
     let mut world = World::new();
 
     event_loop.run(move |event, _, control_flow| {
@@ -73,6 +81,15 @@ fn main() -> Result<(), Error> {
                 *control_flow = ControlFlow::Exit;
                 return;
             }
+        }
+
+        for event in midi_interface.pending_events() {
+            info!(
+                "{}: {:?} (len = {})",
+                event.stamp,
+                event.message,
+                event.message.len()
+            );
         }
 
         // Handle input events
@@ -137,7 +154,7 @@ impl World {
             None, // Some(Box::new(generate_circular_static_gradient)),
         )));
 
-        let _gradient = colorgrad::warm();
+        let _gradient = colorgrad::turbo();
 
         Self {
             agents,
@@ -185,7 +202,7 @@ impl World {
             let pheromone_value = map_range(pheromone_value, 0.0f64, 1.0f64, 0u8, 255u8);
             pixel.copy_from_slice(&[pheromone_value, pheromone_value, pheromone_value, 0xff]);
 
-            // let (r, g, b, a) = self.gradient.at(pheromone_value).rgba_u8();
+            // let (r, g, b, a) = self._gradient.at(pheromone_value).rgba_u8();
             // pixel.copy_from_slice(&[r, g, b, a]);
         }
     }
