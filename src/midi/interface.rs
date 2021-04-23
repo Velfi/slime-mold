@@ -1,6 +1,7 @@
 use crate::errors::SlimeError;
 use log::{error, info, trace, warn};
 use midir::{Ignore, MidiInput, MidiInputConnection, MidiInputPort};
+use midly::{live::LiveEvent, MidiMessage};
 use std::io::{stdin, stdout, Write};
 use std::sync::mpsc;
 use std::{mem, sync::mpsc::Receiver};
@@ -8,19 +9,13 @@ use std::{mem, sync::mpsc::Receiver};
 pub struct MidiInterface {
     connection: MidiConnection,
     in_port: MidiInputPort,
-    event_receiver: Option<Receiver<MidiEvent>>,
+    event_receiver: Option<Receiver<MidiMessage>>,
 }
 
 enum MidiConnection {
     Unconnected(MidiInput),
     Pending,
     Connected(MidiInputConnection<()>),
-}
-
-#[derive(Debug, Clone)]
-pub struct MidiEvent {
-    pub stamp: u64,
-    pub message: [u8; 3],
 }
 
 impl MidiInterface {
@@ -93,20 +88,37 @@ impl MidiInterface {
             let conn_in = midi_in.connect(
                 &port,
                 "midir-read-input",
-                move |stamp, message, _| {
-                  match message {
-                    &[a, b, c] => {
-                      if let Err(err) = sender.send(MidiEvent { stamp, message: [a, b, c] }) {
-                        error!("Couldn't send MIDI message through MPSC with error: {}", err);
-                      }
-                    },
-                    _ => {
-                      error!("received a MIDI message {} bytes long but expected a 3 byte long message", message.len());
+                move |_stamp, message, _| {
+                    //   match message {
+                    //     &[a, b, c] => {
+                    //       if let Err(err) = sender.send(MidiEvent { stamp, message: [a, b, c] }) {
+                    //         error!("Couldn't send MIDI message through MPSC with error: {}", err);
+                    //       }
+                    //     },
+                    //     _ => {
+                    //       error!("received a MIDI message {} bytes long but expected a 3 byte long message", message.len());
+                    //     }
+                    //   };
+                    let message = message.to_owned();
+                    match LiveEvent::parse(&message) {
+                        Ok(LiveEvent::Midi { message, .. }) => {
+                            if let Err(err) = sender.send(message) {
+                                error!(
+                                    "Couldn't send MIDI message through MPSC with error: {}",
+                                    err
+                                );
+                            }
+                        }
+                        Ok(other_event) => {
+                            warn!("Received an unhandled MIDI event: {:#?}", other_event)
+                        }
+                        Err(err) => {
+                            error!("Couldn't parse MIDI message: {}", err)
+                        }
                     }
-                  };
                 },
                 (),
-              )?;
+            )?;
 
             self.connection = MidiConnection::Connected(conn_in);
 
@@ -121,20 +133,15 @@ impl MidiInterface {
         }
     }
 
-    pub fn close(self) {
-        mem::drop(self);
-        info!("MIDI connection has been closed");
-    }
-
-    pub fn pending_events(&self) -> Box<dyn Iterator<Item = MidiEvent>> {
-        let iter: Box<dyn Iterator<Item = MidiEvent>> = if let Some(rcv) = &self.event_receiver {
+    pub fn pending_events(&self) -> Box<dyn Iterator<Item = MidiMessage>> {
+        let iter: Box<dyn Iterator<Item = MidiMessage>> = if let Some(rcv) = &self.event_receiver {
             trace!("MIDI receiver is opened, pending events may exist");
             // I couldn't figure out any other way to do this
             let i: Vec<_> = rcv.try_iter().collect();
             Box::new(i.into_iter())
         } else {
             warn!("No MIDI event receiver has been opened. Please open the MidiInterface before checking for pending events");
-            Box::new(std::iter::empty::<MidiEvent>())
+            Box::new(std::iter::empty())
         };
 
         iter

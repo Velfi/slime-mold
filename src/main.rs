@@ -7,10 +7,12 @@ mod swapper;
 mod util;
 
 pub use agent::Agent;
+use agent::AgentUpdate;
 use colorgrad::Gradient;
 use errors::SlimeError;
-use log::{error, info};
+use log::{debug, error, info};
 use midi::MidiInterface;
+use midly::MidiMessage;
 use pheromones::Pheromones;
 use pixels::{Pixels, SurfaceTexture};
 pub use point2::Point2;
@@ -28,7 +30,8 @@ use winit_input_helper::WinitInputHelper;
 
 pub const WIDTH: u32 = 1000;
 pub const HEIGHT: u32 = 1000;
-pub const AGENT_COUNT: usize = 1000;
+pub const AGENT_COUNT: usize = 0;
+pub const AGENT_COUNT_MAXIMUM: usize = 100000;
 pub const AGENT_JITTER: f64 = 10.0;
 pub const AGENT_SPEED_MIN: f64 = 0.5;
 pub const AGENT_SPEED_MAX: f64 = 1.2;
@@ -64,7 +67,7 @@ fn main() -> Result<(), SlimeError> {
         let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
         Pixels::new(WIDTH, HEIGHT, surface_texture)?
     };
-    let mut midi_interface = MidiInterface::new(None)?;
+    let mut midi_interface = MidiInterface::new(Some("Summit"))?;
     midi_interface.open()?;
 
     let mut world = World::new();
@@ -84,12 +87,30 @@ fn main() -> Result<(), SlimeError> {
         }
 
         for event in midi_interface.pending_events() {
-            info!(
-                "{}: {:?} (len = {})",
-                event.stamp,
-                event.message,
-                event.message.len()
-            );
+            match event {
+                MidiMessage::NoteOn { key, vel } => {
+                    let (key, vel) = (key.as_int(), vel.as_int());
+                    info!("hit note {} with vel {}", key, vel);
+
+                    let mut new_agents: Vec<_> = (0..5)
+                        .into_iter()
+                        .map(|_| new_agent_from_midi(key, vel))
+                        .collect();
+
+                    world.agents.append(&mut new_agents)
+                }
+                MidiMessage::NoteOff { key, vel } => {
+                    debug!("released note {} with vel {}", key, vel);
+                }
+                MidiMessage::Aftertouch { key, vel } => {
+                    debug!("Aftertouch: key {} vel {}", key, vel)
+                }
+                MidiMessage::Controller { controller, value } => {
+                    debug!("Controller {} value {}", controller, value);
+                    handle_controller_input(&mut world, controller.as_int(), value.as_int());
+                }
+                _ => (),
+            }
         }
 
         // Handle input events
@@ -179,6 +200,10 @@ impl World {
 
         pheromones.borrow_mut().diffuse();
         pheromones.borrow_mut().decay();
+
+        if self.agents.len() > AGENT_COUNT_MAXIMUM {
+            self.agents.truncate(AGENT_COUNT_MAXIMUM)
+        }
     }
 
     /// Draw the `World` state to the frame buffer.
@@ -206,4 +231,64 @@ impl World {
             // pixel.copy_from_slice(&[r, g, b, a]);
         }
     }
+}
+
+// Notes on my synth are in the 36 to 96 range by default
+// vel ranges from 0 to 127
+fn new_agent_from_midi(key: u8, vel: u8) -> Agent {
+    let rng = fastrand::Rng::new();
+    let move_speed = map_range(rng.f64(), 0.0, 1.0, AGENT_SPEED_MIN, AGENT_SPEED_MAX);
+    let location = Point2::new(
+        map_range(key as f64, 36.0, 96.0, 0.0, WIDTH as f64),
+        map_range(vel as f64, 0.0, 127.0, 0.0, HEIGHT as f64),
+    );
+
+    let heading = map_range(
+        rng.f64(),
+        0.0,
+        1.0,
+        AGENT_POSSIBLE_STARTING_HEADINGS.start,
+        AGENT_POSSIBLE_STARTING_HEADINGS.end,
+    );
+
+    Agent::builder()
+        .location(location)
+        .heading(heading)
+        .move_speed(move_speed)
+        .jitter(AGENT_JITTER)
+        .deposition_amount(DEPOSITION_AMOUNT)
+        .rotation_speed(AGENT_TURN_SPEED)
+        .build()
+}
+
+fn handle_controller_input(world: &mut World, controller: u8, value: u8) {
+    match controller {
+        // Noise Level
+        27 => {
+            let jitter = Some(map_range(value as f64, 0.0, 127.0, 2.0, 40.0));
+            let agent_update = AgentUpdate {
+                jitter,
+                ..Default::default()
+            };
+
+            world
+                .agents
+                .iter_mut()
+                .for_each(|agent| agent.apply_update(&agent_update));
+        }
+        // Filter Freq
+        29 => {
+            let deposition_amount = Some(map_range(value as f64, 0.0, 127.0, 0.2, 4.0));
+            let agent_update = AgentUpdate {
+                deposition_amount,
+                ..Default::default()
+            };
+
+            world
+                .agents
+                .iter_mut()
+                .for_each(|agent| agent.apply_update(&agent_update));
+        }
+        _ => (),
+    };
 }

@@ -33,6 +33,32 @@ pub struct Agent {
     deposition_amount: f64,
 }
 
+pub struct AgentUpdate {
+    pub location: Option<Point2<f64>>,
+    pub heading: Option<f64>,
+    pub sensor_angle: Option<f64>,
+    pub sensor_distance: Option<f64>,
+    pub move_speed: Option<f64>,
+    pub rotation_speed: Option<f64>,
+    pub jitter: Option<f64>,
+    pub deposition_amount: Option<f64>,
+}
+
+impl Default for AgentUpdate {
+    fn default() -> Self {
+        AgentUpdate {
+            location: None,
+            heading: None,
+            sensor_angle: None,
+            sensor_distance: None,
+            move_speed: None,
+            rotation_speed: None,
+            jitter: None,
+            deposition_amount: None,
+        }
+    }
+}
+
 impl Agent {
     pub fn judge_sensory_input(
         &self,
@@ -121,6 +147,27 @@ impl Agent {
 
         self.location
             .clamp(0.0, 0.0, (WIDTH - 1) as f64, (HEIGHT - 1) as f64)
+    }
+
+    pub fn apply_update(&mut self, update: &AgentUpdate) {
+        update.location.and_then(|val| Some(self.location = val));
+        update.heading.and_then(|val| Some(self.heading = val));
+        update
+            .sensor_angle
+            .and_then(|val| Some(self.sensor_angle = val));
+        update
+            .sensor_distance
+            .and_then(|val| Some(self.sensor_distance = val));
+        update
+            .move_speed
+            .and_then(|val| Some(self.move_speed = val));
+        update
+            .rotation_speed
+            .and_then(|val| Some(self.rotation_speed = val));
+        update.jitter.and_then(|val| Some(self.jitter = val));
+        update
+            .deposition_amount
+            .and_then(|val| Some(self.deposition_amount = val));
     }
 }
 
