@@ -1,23 +1,21 @@
 use num::Float;
-use std::ops::AddAssign;
+use std::{fmt::Display, ops::AddAssign};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Point2<T> {
-    x: T,
-    y: T,
+    pub x: T,
+    pub y: T,
+}
+
+impl<T: Display> Display for Point2<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(x: {}, y: {})", self.x, self.y)
+    }
 }
 
 impl<T: Copy> Point2<T> {
     pub fn new(x: T, y: T) -> Self {
         Self { x, y }
-    }
-
-    pub fn x(&self) -> T {
-        self.x
-    }
-
-    pub fn y(&self) -> T {
-        self.y
     }
 
     pub fn move_absolute(&mut self, x: T, y: T) {
@@ -32,7 +30,7 @@ where
     T: Float,
 {
     pub fn distance_to(&self, other: &Point2<T>) -> T {
-        ((other.x() - self.x()).powi(2) + (other.y() - self.y()).powi(2)).sqrt()
+        ((other.x - self.x).powi(2) + (other.y - self.y).powi(2)).sqrt()
     }
 }
 
@@ -88,6 +86,21 @@ impl Into<Point2<usize>> for Point2<f64> {
         Point2 {
             x: self.x.round() as usize,
             y: self.y.round() as usize,
+        }
+    }
+}
+
+impl Into<Point2<u32>> for Point2<f64> {
+    fn into(self) -> Point2<u32> {
+        Point2 {
+            x: self
+                .x
+                .round()
+                .clamp(std::u32::MIN as f64, std::u32::MAX as f64) as u32,
+            y: self
+                .y
+                .round()
+                .clamp(std::u32::MIN as f64, std::u32::MAX as f64) as u32,
         }
     }
 }

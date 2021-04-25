@@ -4,63 +4,54 @@ mod errors;
 mod midi;
 mod pheromones;
 mod point2;
+mod rect;
+mod settings;
 mod swapper;
 mod util;
+mod world;
 
 pub use agent::Agent;
-#[cfg(feature = "midi")]
-use agent::AgentUpdate;
 use circular_queue::CircularQueue;
-use colorgrad::Gradient;
-use colorgrad::{Color, CustomGradient};
 use errors::SlimeError;
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 #[cfg(feature = "midi")]
 use midi::{MidiInterface, MidiMessage};
+use notify::{ReadDirectoryChangesWatcher, RecommendedWatcher, RecursiveMode, Watcher};
 use pheromones::Pheromones;
 use pixels::{Pixels, SurfaceTexture};
 pub use point2::Point2;
-use rand::prelude::*;
-use rayon::prelude::*;
-use std::sync::{Arc, RwLock};
+use settings::Settings;
+use std::path::Path;
+use std::sync::mpsc::Receiver;
 use std::time::Instant;
 pub use swapper::Swapper;
-use util::map_range;
 use winit::{
     dpi::LogicalSize,
     event::{Event, VirtualKeyCode},
     event_loop::{ControlFlow, EventLoop},
+    window::Fullscreen,
     window::WindowBuilder,
 };
 use winit_input_helper::WinitInputHelper;
+use world::World;
 
-// General settings
-pub const WIDTH: u32 = 1920;
-pub const HEIGHT: u32 = 1080;
-
-// Agent settings
-pub const AGENT_COUNT: usize = 100000;
-pub const AGENT_COUNT_MAXIMUM: usize = 100000;
-pub const AGENT_JITTER: f64 = 10.0;
-pub const AGENT_SPEED_MIN: f64 = 0.5 + 10.0;
-pub const AGENT_SPEED_MAX: f64 = 1.2 + 10.0;
-pub const AGENT_TURN_SPEED: f64 = 12.0;
-pub const AGENT_POSSIBLE_STARTING_HEADINGS: std::ops::Range<f64> = 0.0..360.0;
-pub const DEPOSITION_AMOUNT: f64 = 1.0;
-
-// Pheromone settings
-/// Represents the rate at which pheromone signals disappear. A typical decay factor is 1/100 the rate of deposition
-pub const DECAY_FACTOR: f64 = 0.01;
+pub const DEFAULT_SETTINGS_FILE: &str = "simulation_settings.hjson";
 
 fn main() -> Result<(), SlimeError> {
+    let _ = dotenv::dotenv();
     env_logger::init();
+    let settings = Settings::load_from_file(&DEFAULT_SETTINGS_FILE)?;
+    let (settings_update_receiver, settings_update_watcher) =
+        setup_settings_file_watcher(&DEFAULT_SETTINGS_FILE);
 
     let event_loop = EventLoop::new();
     let mut input = WinitInputHelper::new();
-    debug!("opening {} by {} window", WIDTH, HEIGHT);
 
     let window = {
-        let size = LogicalSize::new(WIDTH as f64, HEIGHT as f64);
+        let size = LogicalSize::new(
+            settings.window_width() as f64,
+            settings.window_height() as f64,
+        );
         WindowBuilder::new()
             .with_title("Slime Mold")
             .with_inner_size(size)
@@ -69,6 +60,16 @@ fn main() -> Result<(), SlimeError> {
             .unwrap()
     };
 
+    if settings.window_fullscreen() {
+        window.set_fullscreen(Some(Fullscreen::Borderless(window.current_monitor())));
+    }
+
+    debug!(
+        "opening {} by {} window",
+        settings.window_width(),
+        settings.window_height()
+    );
+
     let mut pixels = {
         let window_size = window.inner_size();
         debug!(
@@ -76,7 +77,11 @@ fn main() -> Result<(), SlimeError> {
             window_size.width, window_size.height
         );
         let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
-        Pixels::new(WIDTH, HEIGHT, surface_texture)?
+        Pixels::new(
+            settings.window_width(),
+            settings.window_height(),
+            surface_texture,
+        )?
     };
 
     #[cfg(feature = "midi")]
@@ -84,7 +89,7 @@ fn main() -> Result<(), SlimeError> {
     #[cfg(feature = "midi")]
     midi_interface.open()?;
 
-    let mut world = World::new();
+    let mut world = World::new(settings);
 
     let mut frame_time = 0.16;
     let mut time_of_last_frame_start = Instant::now();
@@ -161,7 +166,7 @@ fn main() -> Result<(), SlimeError> {
 
             // Toggle B/W mode
             if input.key_pressed(VirtualKeyCode::B) {
-                world.black_and_white_mode = !world.black_and_white_mode
+                world.toggle_black_and_white_mode();
             }
 
             // Resize the window
@@ -173,231 +178,40 @@ fn main() -> Result<(), SlimeError> {
             world.update();
             window.request_redraw();
         }
+
+        match settings_update_receiver.try_recv() {
+            Ok(_event) => {
+                info!("Settings file has changed. Reloading it and updating the World");
+                if let Err(e) = world.reload_settings() {
+                    error!("failed to reload settings file: {}", e)
+                }
+            }
+            Err(e) => {
+                // This error is expected because the file typically doesn't change much
+                trace!("settings_update_receiver watch error: {:?}", e);
+            }
+        }
     });
 }
 
-struct World {
-    agents: Vec<Agent>,
-    frame_time: f64,
-    gradient: Gradient,
-    pheromones: Arc<RwLock<Pheromones>>,
-    /// A toggle for rendering in color vs. black & white mode. Color mode has an FPS cost so we render in B&W by default
-    black_and_white_mode: bool,
-}
+fn setup_settings_file_watcher(
+    path: impl AsRef<Path>,
+) -> (
+    Receiver<notify::Result<notify::Event>>,
+    ReadDirectoryChangesWatcher,
+) {
+    let (tx, rx) = std::sync::mpsc::channel();
 
-impl World {
-    /// Create a new `World` instance that can draw a moving box.
-    fn new() -> Self {
-        info!("generating {} agents", AGENT_COUNT);
-        info!(
-            r#"
-AGENT_COUNT_MAX	{:?}
-AGENT_JITTER	{:?}
-AGENT_SPEED_	{:?}
-AGENT_SPEED_	{:?}
-AGENT_TURN_SPEED	{:?}
-AGENT_POSSIBLE_STRT_HDGS	{:?}
-DEPOSITION_AMOUN	{:?}
-DECAY_FACTOR	{:?}
-"#,
-            AGENT_COUNT_MAXIMUM,
-            AGENT_JITTER,
-            AGENT_SPEED_MIN,
-            AGENT_SPEED_MAX,
-            AGENT_TURN_SPEED,
-            AGENT_POSSIBLE_STARTING_HEADINGS,
-            DEPOSITION_AMOUNT,
-            DECAY_FACTOR,
-        );
+    // Automatically select the best implementation for your platform.
+    // You can also access each implementation directly e.g. INotifyWatcher.
+    let mut watcher: RecommendedWatcher = Watcher::new_immediate(move |res| tx.send(res).unwrap())
+        .expect("couldn't create file change watcher");
 
-        let agents: Vec<_> = (0..AGENT_COUNT)
-            .into_iter()
-            .map(|i| {
-                let mut rng: StdRng = SeedableRng::from_entropy();
-                let deposition_amount = if i == 0 {
-                    DEPOSITION_AMOUNT * 20.0
-                } else {
-                    DEPOSITION_AMOUNT
-                };
-                let move_speed = rng.gen_range(AGENT_SPEED_MIN..AGENT_SPEED_MAX);
-                let location = Point2::new(
-                    rng.gen_range(0.0..(WIDTH as f64)),
-                    rng.gen_range(0.0..(HEIGHT as f64)),
-                );
-                let heading = rng.gen_range(AGENT_POSSIBLE_STARTING_HEADINGS);
+    // Add a path to be watched. All files and directories at that path and
+    // below will be monitored for changes.
+    watcher
+        .watch(path, RecursiveMode::Recursive)
+        .expect("couldn't start file change watcher");
 
-                Agent::builder()
-                    .location(location)
-                    .heading(heading)
-                    .move_speed(move_speed)
-                    .jitter(AGENT_JITTER)
-                    .deposition_amount(deposition_amount)
-                    .rotation_speed(AGENT_TURN_SPEED)
-                    .rng(SeedableRng::from_entropy())
-                    .build()
-            })
-            .collect();
-
-        let pheromones = Arc::new(RwLock::new(Pheromones::new(
-            WIDTH as usize,
-            HEIGHT as usize,
-            0.0,
-            true,
-            None, // Some(Box::new(generate_circular_static_gradient)),
-        )));
-
-        let gradient = CustomGradient::new()
-            .colors(&[
-                Color::from_rgb_u8(0, 0, 0),
-                Color::from_rgb_u8(255, 251, 238),
-            ])
-            .build()
-            .expect("failed to build gradient");
-
-        Self {
-            agents,
-            frame_time: 0.0,
-            gradient,
-            pheromones,
-            black_and_white_mode: true,
-        }
-    }
-
-    fn set_frame_time(&mut self, frame_time: f64) {
-        self.frame_time = frame_time;
-    }
-
-    /// Update the `World` internal state; bounce the box around the screen.
-    fn update(&mut self) {
-        let pheromones = &self.pheromones;
-        let agents = &mut self.agents;
-        // More stuff should be affected by delta_t in order to make the simulation run at the same speed
-        // regardless of how fast the program is actually running. Right now it just affects agent speed.
-        let delta_t = self.frame_time;
-
-        agents.iter_mut().for_each(|agent| {
-            let pheromones = pheromones
-                .read()
-                .expect("reading pheromones during agent update");
-            let sensory_input = agent.sense(&pheromones);
-            let rotation_towards_sensory_input = agent.judge_sensory_input(sensory_input);
-            agent.rotate(rotation_towards_sensory_input);
-            agent.move_in_direction_of_current_heading(delta_t);
-        });
-
-        let pheromones = &mut self.pheromones;
-        let agents = &self.agents;
-
-        pheromones
-            .write()
-            .expect("couldn't get mut ref to pheromones for deposit step")
-            .deposit(agents);
-
-        pheromones
-            .write()
-            .expect("couldn't get mut ref to pheromones for diffuse step")
-            .diffuse();
-        pheromones
-            .write()
-            .expect("couldn't get mut ref to pheromones for decay step")
-            .decay();
-
-        if self.agents.len() > AGENT_COUNT_MAXIMUM {
-            self.agents.truncate(AGENT_COUNT_MAXIMUM)
-        }
-    }
-
-    /// Draw the `World` state to the frame buffer.
-    ///
-    /// Assumes the default texture format: `wgpu::TextureFormat::Rgba8UnormSrgb`
-    /// Assumes that pheromone grid and pixel FB have same dimensions
-    fn draw(&self, frame: &mut [u8]) {
-        let pixel_iter = frame.par_chunks_exact_mut(4);
-        let gradient = &self.gradient;
-        // TODO Grid doesn't support parallel iterators, what do?
-        let pheromones: Vec<_> = self
-            .pheromones
-            .read()
-            .expect("couldn't get lock on pheromones for draw")
-            .iter()
-            .map(ToOwned::to_owned)
-            .collect();
-
-        pixel_iter
-            .zip_eq(pheromones.par_iter())
-            .for_each(|(pixel, pheromone_value)| {
-                // clamp to renderable range
-                let pheromone_value = pheromone_value.clamp(0.0, 1.0);
-                // map cell pheromone values to rgba pixels
-                if self.black_and_white_mode == true {
-                    let pheromone_value = map_range(pheromone_value, 0.0f64, 1.0f64, 0u8, 255u8);
-                    pixel.copy_from_slice(&[
-                        pheromone_value,
-                        pheromone_value,
-                        pheromone_value,
-                        0xff,
-                    ]);
-                } else {
-                    let (r, g, b, a) = gradient.at(pheromone_value).rgba_u8();
-                    pixel.copy_from_slice(&[r, g, b, a]);
-                }
-            });
-    }
-}
-
-// Notes on my synth are in the 36 to 96 range by default
-// vel ranges from 0 to 127
-#[cfg(feature = "midi")]
-fn new_agent_from_midi(key: u8, vel: u8) -> Agent {
-    let mut rng: StdRng = SeedableRng::from_entropy();
-    let move_speed = rng.gen_range(AGENT_SPEED_MIN..AGENT_SPEED_MAX);
-    let location = Point2::new(
-        map_range(key as f64, 36.0, 96.0, 0.0, WIDTH as f64),
-        map_range(vel as f64, 0.0, 127.0, 0.0, HEIGHT as f64),
-    );
-
-    let heading = rng.gen_range(AGENT_POSSIBLE_STARTING_HEADINGS);
-
-    Agent::builder()
-        .location(location)
-        .heading(heading)
-        .move_speed(move_speed)
-        .jitter(AGENT_JITTER)
-        .deposition_amount(DEPOSITION_AMOUNT)
-        .rotation_speed(AGENT_TURN_SPEED)
-        .rng(rng)
-        .build()
-}
-
-#[cfg(feature = "midi")]
-fn handle_controller_input(world: &mut World, controller: u8, value: u8) {
-    match controller {
-        // Noise Level
-        27 => {
-            let jitter = Some(map_range(value as f64, 0.0, 127.0, 2.0, 40.0));
-            let agent_update = AgentUpdate {
-                jitter,
-                ..Default::default()
-            };
-
-            world
-                .agents
-                .iter_mut()
-                .for_each(|agent| agent.apply_update(&agent_update));
-        }
-        // Filter Freq
-        29 => {
-            let deposition_amount = Some(map_range(value as f64, 0.0, 127.0, 0.2, 4.0));
-            let agent_update = AgentUpdate {
-                deposition_amount,
-                ..Default::default()
-            };
-
-            world
-                .agents
-                .iter_mut()
-                .for_each(|agent| agent.apply_update(&agent_update));
-        }
-        _ => (),
-    };
+    (rx, watcher)
 }

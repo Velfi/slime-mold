@@ -1,15 +1,17 @@
-use crate::{Pheromones, Point2, DEPOSITION_AMOUNT, HEIGHT, WIDTH};
-use log::trace;
+use std::ops::Range;
+
+use crate::{rect::Rect, settings::Settings, Pheromones, Point2};
+use log::{debug, trace};
 use num::{Float, NumCast};
 use rand::prelude::*;
 use typed_builder::TypedBuilder;
 
-pub type SensorReading = (f64, f64, f64);
+pub type SensorReading = (i32, i32, i32);
 
 #[derive(TypedBuilder)]
 pub struct Agent {
     location: Point2<f64>,
-    // The heading and agent is facing. (In degrees)
+    // The heading an agent is facing. (In degrees)
     #[builder(default)]
     heading: f64,
     // There are three sensors per agent: A center sensor, a left sensor, and a right sensor. The side sensors are positioned based on this angle. (In degrees)
@@ -29,8 +31,8 @@ pub struct Agent {
     jitter: f64,
     #[builder(default = SeedableRng::from_entropy())]
     rng: StdRng,
-    #[builder(default = DEPOSITION_AMOUNT)]
-    deposition_amount: f64,
+    #[builder()]
+    deposition_amount: u8,
 }
 
 pub struct AgentUpdate {
@@ -41,7 +43,7 @@ pub struct AgentUpdate {
     pub move_speed: Option<f64>,
     pub rotation_speed: Option<f64>,
     pub jitter: Option<f64>,
-    pub deposition_amount: Option<f64>,
+    pub deposition_amount: Option<u8>,
 }
 
 impl Default for AgentUpdate {
@@ -60,6 +62,41 @@ impl Default for AgentUpdate {
 }
 
 impl Agent {
+    pub fn new_from_settings(settings: &Settings) -> Self {
+        let mut rng: StdRng = SeedableRng::from_entropy();
+        let deposition_amount = settings.agent_deposition_amount();
+        let move_speed = rng.gen_range(settings.agent_speed_min()..settings.agent_speed_max());
+        let location = Point2::new(
+            rng.gen_range(0.0..(settings.window_width() as f64)),
+            rng.gen_range(0.0..(settings.window_height() as f64)),
+        );
+        let heading = rng.gen_range(settings.agent_possible_starting_headings().clone());
+
+        Agent::builder()
+            .location(location)
+            .heading(heading)
+            .move_speed(move_speed)
+            .jitter(settings.agent_jitter())
+            .deposition_amount(deposition_amount)
+            .rotation_speed(settings.agent_turn_speed())
+            .rng(SeedableRng::from_entropy())
+            .build()
+    }
+
+    pub fn update(&mut self, pheromones: &Pheromones, delta_t: f64, boundary_rect: &Rect<u32>) {
+        let sensory_input = self.sense(&pheromones, &boundary_rect);
+        let rotation_towards_sensory_input = self.judge_sensory_input(sensory_input);
+        self.rotate(rotation_towards_sensory_input);
+
+        move_in_direction_of_heading(
+            &mut self.location,
+            self.heading,
+            self.move_speed,
+            delta_t,
+            boundary_rect,
+        );
+    }
+
     pub fn judge_sensory_input(&mut self, (l_reading, c_reading, r_reading): SensorReading) -> f64 {
         if c_reading > l_reading && c_reading > r_reading {
             // do nothing, stay facing same direction
@@ -94,32 +131,51 @@ impl Agent {
         self.location
     }
 
-    pub fn deposition_amount(&self) -> f64 {
+    pub fn deposition_amount(&self) -> u8 {
         self.deposition_amount
     }
 
-    // TODO why don't they fear the edges?
-    pub fn sense(&self, pheromones: &Pheromones) -> SensorReading {
-        let sensor_l_heading = rotate_by_degrees(self.heading, -self.sensor_angle);
-        let sensor_c_heading = self.heading;
-        let sensor_r_heading = rotate_by_degrees(self.heading, self.sensor_angle);
+    pub fn set_new_random_move_speed_in_range(&mut self, move_speed_range: Range<f64>) {
+        self.move_speed = self.rng.gen_range(move_speed_range);
+        trace!("set agent's speed to {}", self.move_speed);
+    }
 
-        let sensor_l_location =
-            move_in_direction_of_heading(self.location, sensor_l_heading, self.sensor_distance);
-        let sensor_c_location =
-            move_in_direction_of_heading(self.location, sensor_c_heading, self.sensor_distance);
-        let sensor_r_location =
-            move_in_direction_of_heading(self.location, sensor_r_heading, self.sensor_distance);
+    // TODO why don't they fear the edges?
+    pub fn sense(&self, pheromones: &Pheromones, boundary_rect: &Rect<u32>) -> SensorReading {
+        let mut sensor_l_location = self.location.clone();
+        move_in_direction_of_heading(
+            &mut sensor_l_location,
+            rotate_by_degrees(self.heading, -self.sensor_angle),
+            self.sensor_distance,
+            1.0,
+            boundary_rect,
+        );
+        let mut sensor_c_location = self.location.clone();
+        move_in_direction_of_heading(
+            &mut sensor_c_location,
+            self.heading,
+            self.sensor_distance,
+            1.0,
+            boundary_rect,
+        );
+        let mut sensor_r_location = self.location.clone();
+        move_in_direction_of_heading(
+            &mut sensor_r_location,
+            rotate_by_degrees(self.heading, self.sensor_angle),
+            self.sensor_distance,
+            1.0,
+            boundary_rect,
+        );
 
         // This assumes that there is a 1:1 relationship between an agent's possible
         // movement space in a grid, and the pheromone field. What if we want to have agents moving
         // around and storing that at one level of detail and save the pheromone field at another level
         // of detail?
-        // Also, if a sensor goes out of bounds, it just reads 0.0
+        // Also, if a sensor goes out of bounds, it reads -1
         // Maybe it'd be better to wrap the agents (and their sensors) to the other side of the field?
-        let sensor_l_reading = pheromones.get_reading(sensor_l_location).unwrap_or(-1.0);
-        let sensor_c_reading = pheromones.get_reading(sensor_c_location).unwrap_or(-1.0);
-        let sensor_r_reading = pheromones.get_reading(sensor_r_location).unwrap_or(-1.0);
+        let sensor_l_reading = pheromones.get_reading(sensor_l_location).unwrap_or(-1);
+        let sensor_c_reading = pheromones.get_reading(sensor_c_location).unwrap_or(-1);
+        let sensor_r_reading = pheromones.get_reading(sensor_r_location).unwrap_or(-1);
 
         (sensor_l_reading, sensor_c_reading, sensor_r_reading)
     }
@@ -137,17 +193,6 @@ impl Agent {
 
         self.heading = rotate_by_degrees(self.heading, rotation_in_degrees);
         trace!("new heading is {}", self.heading);
-    }
-
-    pub fn move_in_direction_of_current_heading(&mut self, delta_t: f64) {
-        let heading_in_radians = self.heading.to_radians();
-        self.location.move_relative(
-            self.move_speed * delta_t * heading_in_radians.sin(),
-            self.move_speed * delta_t * heading_in_radians.cos(),
-        );
-
-        self.location
-            .clamp(0.0, 0.0, (WIDTH - 1) as f64, (HEIGHT - 1) as f64)
     }
 
     pub fn apply_update(&mut self, update: &AgentUpdate) {
@@ -190,19 +235,38 @@ fn rotate_by_degrees<T: Float>(n: T, rotation_in_degrees: T) -> T {
     rotated_n
 }
 
-fn move_in_direction_of_heading(
-    mut location: Point2<f64>,
+pub fn move_in_direction_of_heading(
+    location: &mut Point2<f64>,
     heading: f64,
-    distance: f64,
-) -> Point2<f64> {
+    speed: f64,
+    delta_t: f64,
+    boundary_rect: &Rect<u32>,
+) {
     let heading_in_radians = heading.to_radians();
 
-    location.move_relative(
-        distance * heading_in_radians.sin(),
-        distance * heading_in_radians.cos(),
+    move_relative_wrapping(
+        location,
+        delta_t * speed * heading_in_radians.sin(),
+        delta_t * speed * heading_in_radians.cos(),
+        boundary_rect,
     );
+}
 
-    location
+pub fn move_relative_wrapping(xy: &mut Point2<f64>, x: f64, y: f64, boundary_rect: &Rect<u32>) {
+    xy.x += x;
+    xy.y += y;
+
+    if xy.x >= boundary_rect.x_max() as f64 {
+        xy.x = xy.x - boundary_rect.x_max() as f64;
+    } else if xy.x < boundary_rect.x_min() as f64 {
+        xy.x = xy.x + boundary_rect.x_max() as f64;
+    }
+
+    if xy.y >= boundary_rect.y_max() as f64 {
+        xy.x = xy.x - boundary_rect.y_max() as f64;
+    } else if xy.y < boundary_rect.y_min() as f64 {
+        xy.x = xy.x + boundary_rect.y_max() as f64;
+    }
 }
 
 #[cfg(test)]
@@ -268,91 +332,4 @@ mod test {
 
         assert_eq!(expected_end_rotation, actual_end_rotation)
     }
-
-    // When doing math on floating point numbers, we inevitably run into inaccuracies.
-    // We allow for a small margin of error in order to avoid failing a test on account
-    // of those small, expected inaccuracies.
-    const FLOAT_MARGIN_OF_ERROR: f64 = 0.001;
-
-    #[test]
-    fn move_in_direction_of_heading_if_no_movement() {
-        let start_location = Point2::new(0.0f64, 0.0);
-        let heading = 0.0f64;
-        let distance = 0.0f64;
-        let expected_end_location = Point2::new(0.0f64, 0.0);
-        let actual_end_location = move_in_direction_of_heading(start_location, heading, distance);
-
-        assert!(expected_end_location.distance_to(&actual_end_location) < FLOAT_MARGIN_OF_ERROR)
-    }
-
-    #[test]
-    fn move_in_direction_of_heading_if_move_north_one_unit() {
-        let start_location = Point2::new(0.0f64, 0.0);
-        let heading = 0.0f64;
-        let distance = 1.0f64;
-        let expected_end_location = Point2::new(0.0f64, 1.0);
-        let actual_end_location = move_in_direction_of_heading(start_location, heading, distance);
-
-        assert!(expected_end_location.distance_to(&actual_end_location) < FLOAT_MARGIN_OF_ERROR)
-    }
-
-    #[test]
-    fn move_in_direction_of_heading_if_move_east_one_unit() {
-        let start_location = Point2::new(0.0f64, 0.0);
-        let heading = 90.0f64;
-        let distance = 1.0f64;
-        let expected_end_location = Point2::new(1.0f64, 0.0);
-        let actual_end_location = move_in_direction_of_heading(start_location, heading, distance);
-
-        assert!(expected_end_location.distance_to(&actual_end_location) < FLOAT_MARGIN_OF_ERROR)
-    }
-
-    #[test]
-    fn move_in_direction_of_heading_if_move_south_one_unit() {
-        let start_location = Point2::new(0.0f64, 0.0);
-        let heading = 180.0f64;
-        let distance = 1.0f64;
-        let expected_end_location = Point2::new(0.0f64, -1.0);
-        let actual_end_location = move_in_direction_of_heading(start_location, heading, distance);
-
-        assert!(expected_end_location.distance_to(&actual_end_location) < FLOAT_MARGIN_OF_ERROR)
-    }
-
-    #[test]
-    fn move_in_direction_of_heading_if_move_west_one_unit() {
-        let start_location = Point2::new(0.0f64, 0.0);
-        let heading = 270.0f64;
-        let distance = 1.0f64;
-        let expected_end_location = Point2::new(-1.0f64, 0.0);
-        let actual_end_location = move_in_direction_of_heading(start_location, heading, distance);
-
-        assert!(expected_end_location.distance_to(&actual_end_location) < FLOAT_MARGIN_OF_ERROR)
-    }
-
-    #[test]
-    fn move_in_direction_of_heading_treats_equivalent_headings_equally() {
-        let location_from_positive_heading = {
-            let start_location = Point2::new(0.0f64, 0.0);
-            let heading = 270.0f64;
-            let distance = 1.0f64;
-            move_in_direction_of_heading(start_location, heading, distance)
-        };
-
-        let location_from_negative_heading = {
-            let start_location = Point2::new(0.0f64, 0.0);
-            let heading = -90.0f64;
-            let distance = 1.0f64;
-            move_in_direction_of_heading(start_location, heading, distance)
-        };
-
-        assert!(
-            location_from_positive_heading.distance_to(&location_from_negative_heading)
-                < FLOAT_MARGIN_OF_ERROR
-        )
-    }
-
-    // #[test]
-    // fn move_in_direction_of_heading_if_location_is_zero() {
-    //     todo!()
-    // }
 }
