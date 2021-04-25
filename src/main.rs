@@ -41,7 +41,7 @@ fn main() -> Result<(), SlimeError> {
     let _ = dotenv::dotenv();
     env_logger::init();
     let settings = Settings::load_from_file(&DEFAULT_SETTINGS_FILE)?;
-    let (settings_update_receiver, settings_update_watcher) =
+    let (settings_update_receiver, _settings_update_watcher) =
         setup_settings_file_watcher(&DEFAULT_SETTINGS_FILE);
 
     let event_loop = EventLoop::new();

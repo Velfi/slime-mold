@@ -1,7 +1,7 @@
 use std::ops::Range;
 
 use crate::{rect::Rect, settings::Settings, Pheromones, Point2};
-use log::{debug, trace};
+use log::trace;
 use num::{Float, NumCast};
 use rand::prelude::*;
 use typed_builder::TypedBuilder;
@@ -173,9 +173,9 @@ impl Agent {
         // of detail?
         // Also, if a sensor goes out of bounds, it reads -1
         // Maybe it'd be better to wrap the agents (and their sensors) to the other side of the field?
-        let sensor_l_reading = pheromones.get_reading(sensor_l_location).unwrap_or(-1);
-        let sensor_c_reading = pheromones.get_reading(sensor_c_location).unwrap_or(-1);
-        let sensor_r_reading = pheromones.get_reading(sensor_r_location).unwrap_or(-1);
+        let sensor_l_reading = pheromones.get_reading(sensor_l_location).unwrap_or(0);
+        let sensor_c_reading = pheromones.get_reading(sensor_c_location).unwrap_or(0);
+        let sensor_r_reading = pheromones.get_reading(sensor_r_location).unwrap_or(0);
 
         (sensor_l_reading, sensor_c_reading, sensor_r_reading)
     }

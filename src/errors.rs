@@ -1,5 +1,3 @@
-use std::sync::RwLockWriteGuard;
-
 #[cfg(feature = "midi")]
 use midir::MidiInput;
 use thiserror::Error;

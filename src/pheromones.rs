@@ -53,6 +53,7 @@ impl Pheromones {
         }
     }
 
+    // TODO make this a wrapping get
     pub fn get_reading(&self, at_location: Point2<f64>) -> Option<i32> {
         let (x, y) = (at_location.x.round(), at_location.y.round());
         let is_within_bounds =

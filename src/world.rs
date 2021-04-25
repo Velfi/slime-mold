@@ -7,7 +7,7 @@ use crate::{
     util::map_range,
     DEFAULT_SETTINGS_FILE,
 };
-use colorgrad::{Color, CustomGradient, Gradient};
+use colorgrad::Gradient;
 use log::{error, info};
 use rayon::prelude::*;
 use std::sync::{Arc, RwLock};
@@ -61,13 +61,7 @@ DECAY_FACTOR	{:?}
             Some(Box::new(pheromones::generate_circular_static_gradient)),
         )));
 
-        let gradient = CustomGradient::new()
-            .colors(&[
-                Color::from_rgb_u8(0, 0, 0),
-                Color::from_rgb_u8(255, 217, 112),
-            ])
-            .build()
-            .expect("failed to build gradient");
+        let gradient = colorgrad::viridis();
 
         let boundary_rect = Rect::new(0, 0, settings.window_width(), settings.window_height());
 
