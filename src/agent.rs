@@ -1,7 +1,7 @@
 use crate::{Pheromones, Point2, DEPOSITION_AMOUNT, HEIGHT, WIDTH};
 use log::trace;
 use num::{Float, NumCast};
-use rand::Rng;
+use rand::prelude::*;
 use typed_builder::TypedBuilder;
 
 pub type SensorReading = (f64, f64, f64);
@@ -27,8 +27,8 @@ pub struct Agent {
     // The tendency of agents to move erratically
     #[builder(default = 0.0f64)]
     jitter: f64,
-    #[builder(default)]
-    rng: fastrand::Rng,
+    #[builder(default = SeedableRng::from_entropy())]
+    rng: StdRng,
     #[builder(default = DEPOSITION_AMOUNT)]
     deposition_amount: f64,
 }
@@ -60,18 +60,14 @@ impl Default for AgentUpdate {
 }
 
 impl Agent {
-    pub fn judge_sensory_input(
-        &self,
-        (l_reading, c_reading, r_reading): SensorReading,
-        rng: &mut impl Rng,
-    ) -> f64 {
+    pub fn judge_sensory_input(&mut self, (l_reading, c_reading, r_reading): SensorReading) -> f64 {
         if c_reading > l_reading && c_reading > r_reading {
             // do nothing, stay facing same direction
             trace!("Agent's center value is greatest, doing nothing");
             0.0
         } else if c_reading < l_reading && c_reading < r_reading {
             // rotate randomly to the left or right
-            let should_rotate_right: bool = rng.gen();
+            let should_rotate_right: bool = self.rng.gen();
 
             if should_rotate_right {
                 trace!("Agent is rotating randomly to the right");
@@ -89,8 +85,8 @@ impl Agent {
             trace!("Agent is rotating left");
             -self.rotation_speed
         } else {
-            trace!("Agent is choosing random rotation (final fallthrough case)");
-            rng.gen_range(-self.rotation_speed..self.rotation_speed)
+            trace!("Agent is doing nothing (final fallthrough case)");
+            0.0
         }
     }
 
@@ -130,19 +126,24 @@ impl Agent {
 
     pub fn rotate(&mut self, mut rotation_in_degrees: f64) {
         if self.jitter != 0.0 {
+            let magnitude = if self.rng.gen() {
+                self.rng.gen::<f64>()
+            } else {
+                self.rng.gen::<f64>() * -1.0
+            };
             // Randomly adjust rotation amount
-            rotation_in_degrees += self.jitter * self.rng.f64();
+            rotation_in_degrees += self.jitter * magnitude;
         }
 
         self.heading = rotate_by_degrees(self.heading, rotation_in_degrees);
         trace!("new heading is {}", self.heading);
     }
 
-    pub fn move_in_direction_of_current_heading(&mut self) {
+    pub fn move_in_direction_of_current_heading(&mut self, delta_t: f64) {
         let heading_in_radians = self.heading.to_radians();
         self.location.move_relative(
-            self.move_speed * heading_in_radians.sin(),
-            self.move_speed * heading_in_radians.cos(),
+            self.move_speed * delta_t * heading_in_radians.sin(),
+            self.move_speed * delta_t * heading_in_radians.cos(),
         );
 
         self.location

@@ -90,7 +90,13 @@ impl Pheromones {
         self.grid.a().rows() * self.grid.a().cols()
     }
 
-    pub fn deposit(&mut self, agent: &Agent) {
+    pub fn deposit(&mut self, agents: &[Agent]) {
+        agents
+            .iter()
+            .for_each(|agent| self.deposit_individual_agent(agent))
+    }
+
+    fn deposit_individual_agent(&mut self, agent: &Agent) {
         let location_to_deposit: Point2<usize> = agent.location().into();
 
         match self
