@@ -16,7 +16,13 @@ use errors::SlimeError;
 use log::{debug, error, info, trace};
 #[cfg(feature = "midi")]
 use midi::{MidiInterface, MidiMessage};
-use notify::{ReadDirectoryChangesWatcher, RecommendedWatcher, RecursiveMode, Watcher};
+#[cfg(target_os = "macos")]
+use notify::FsEventWatcher;
+#[cfg(target_os = "linux")]
+use notify::INotifyWatcher;
+#[cfg(target_os = "windows")]
+use notify::ReadDirectoryChangesWatcher;
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use pheromones::Pheromones;
 use pixels::{Pixels, SurfaceTexture};
 pub use point2::Point2;
@@ -193,7 +199,7 @@ fn main() -> Result<(), SlimeError> {
         }
     });
 }
-
+#[cfg(target_os = "windows")]
 fn setup_settings_file_watcher(
     path: impl AsRef<Path>,
 ) -> (
@@ -201,14 +207,39 @@ fn setup_settings_file_watcher(
     ReadDirectoryChangesWatcher,
 ) {
     let (tx, rx) = std::sync::mpsc::channel();
-
-    // Automatically select the best implementation for your platform.
-    // You can also access each implementation directly e.g. INotifyWatcher.
     let mut watcher: RecommendedWatcher = Watcher::new_immediate(move |res| tx.send(res).unwrap())
         .expect("couldn't create file change watcher");
 
-    // Add a path to be watched. All files and directories at that path and
-    // below will be monitored for changes.
+    watcher
+        .watch(path, RecursiveMode::Recursive)
+        .expect("couldn't start file change watcher");
+
+    (rx, watcher)
+}
+
+#[cfg(target_os = "macos")]
+fn setup_settings_file_watcher(
+    path: impl AsRef<Path>,
+) -> (Receiver<notify::Result<notify::Event>>, FsEventWatcher) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut watcher: RecommendedWatcher = Watcher::new_immediate(move |res| tx.send(res).unwrap())
+        .expect("couldn't create file change watcher");
+
+    watcher
+        .watch(path, RecursiveMode::Recursive)
+        .expect("couldn't start file change watcher");
+
+    (rx, watcher)
+}
+
+#[cfg(target_os = "linux")]
+fn setup_settings_file_watcher(
+    path: impl AsRef<Path>,
+) -> (Receiver<notify::Result<notify::Event>>, INotifyWatcher) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut watcher: RecommendedWatcher = Watcher::new_immediate(move |res| tx.send(res).unwrap())
+        .expect("couldn't create file change watcher");
+
     watcher
         .watch(path, RecursiveMode::Recursive)
         .expect("couldn't start file change watcher");
