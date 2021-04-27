@@ -1,4 +1,5 @@
 use crate::{Agent, Point2, Swapper};
+use image::io::Reader as ImageReader;
 use image::GrayImage;
 use imageproc::filter::*;
 use log::{debug, trace};
@@ -207,4 +208,15 @@ pub fn generate_linear_static_gradient(width: u32, height: u32) -> GrayImage {
     );
 
     GrayImage::from_raw(width, height, vec).unwrap()
+}
+
+// TODO figure out how to make a HOF that can generate new functions for arbitrary images instead of having a hardcoded image path
+pub fn generate_image_based_static_gradient(width: u32, height: u32) -> GrayImage {
+    let river_img = ImageReader::open("images/girl.png")
+        .expect("loading image file")
+        .decode()
+        .expect("decoding image file");
+    let resized_img = river_img.resize(width, height, image::imageops::FilterType::Gaussian);
+
+    resized_img.into_luma8()
 }

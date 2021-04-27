@@ -58,7 +58,7 @@ DECAY_FACTOR	{:?}
             settings.window_height(),
             settings.pheromone_decay_factor(),
             true,
-            Some(Box::new(pheromones::generate_linear_static_gradient)),
+            Some(Box::new(pheromones::generate_image_based_static_gradient)),
         )));
 
         let gradient = colorgrad::viridis();
