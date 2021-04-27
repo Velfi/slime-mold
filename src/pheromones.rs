@@ -53,6 +53,10 @@ impl Pheromones {
         }
     }
 
+    pub fn static_gradient(&self) -> Option<&GrayImage> {
+        self.static_gradient.as_ref()
+    }
+
     // TODO make this a wrapping get
     pub fn get_reading(&self, at_location: Point2<f64>) -> Option<i32> {
         let (x, y) = (at_location.x.round(), at_location.y.round());
@@ -137,34 +141,61 @@ pub trait StaticGradientGenerator {
     fn generate(width: u32, height: u32) -> GrayImage;
 }
 
+// TODO only works if height == width
 pub fn generate_circular_static_gradient(width: u32, height: u32) -> GrayImage {
-    let center_x = width as f64 / 2.0;
-    let center_y = height as f64 / 2.0;
     let min_value: f64 = 0.0;
-    let max_value: f64 = 1.0;
-    let angle: f64 = 0.0;
-    let r1: f64 = 0.0;
-    let r2: f64 = width as f64;
+    let max_value: f64 = 255.0;
+    let root_2 = 2.0f64.sqrt();
 
     let vec: Vec<_> = (0..width)
         .into_iter()
         .map(|x| (0..height).into_iter().map(move |y| (x as f64, y as f64)))
         .flatten()
         .map(|(x, y)| {
-            if x.powi(2) + y.powi(2) <= r2.powi(2) && x.powi(2) + y.powi(2) >= r1.powi(2) {
-                let mut t = (y - center_y).atan2(x - center_x) + angle;
-                // atan2 is from -pi to pi
-                t = t + std::f64::consts::PI;
-                // it might over 2PI becuse of +angle
-                if t > 2.0 * std::f64::consts::PI {
-                    t = t - 2.0 * std::f64::consts::PI
-                }
+            let width = width as f64;
+            let height = height as f64;
+            let mut distance_to_center =
+                ((x - width / 2.0).powi(2) + (y - height / 2.0).powi(2)).sqrt();
 
-                t = t / (2.0 * std::f64::consts::PI); // normalise t from 0 to 1
-                ((min_value * t) + (max_value * (1.0 - t))) as u8
-            } else {
-                0
-            }
+            distance_to_center = distance_to_center / (root_2 * width / 2.0);
+
+            let t = min_value * distance_to_center + max_value * (1.0 - distance_to_center);
+
+            t.round() as u8
+        })
+        .collect();
+
+    assert!(
+        vec.len() == (width * height) as usize,
+        "Vector length is {} but width * height is {}",
+        vec.len(),
+        width * height
+    );
+
+    GrayImage::from_raw(width, height, vec).unwrap()
+}
+
+// TODO replace custom gradient generation with raqote?
+pub fn generate_linear_static_gradient(width: u32, height: u32) -> GrayImage {
+    let min_value: f64 = 0.0;
+    let max_value: f64 = 255.0;
+    let a: f64 = -0.6;
+    let b: f64 = -1.0;
+    let c: f64 = width as f64 - (width as f64 / 4.0);
+
+    let vec: Vec<_> = (0..width)
+        .into_iter()
+        .map(|x| (0..height).into_iter().map(move |y| (x as f64, y as f64)))
+        .flatten()
+        .map(|(x, y)| {
+            let width = width as f64;
+
+            let distance = (a * x + b * y + c) / (a * a + b * b).sqrt();
+            let color_coef = distance.abs() / width;
+
+            let t = min_value * color_coef + max_value * (1.0 - color_coef);
+
+            t.round() as u8
         })
         .collect();
 

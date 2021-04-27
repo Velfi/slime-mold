@@ -58,7 +58,7 @@ DECAY_FACTOR	{:?}
             settings.window_height(),
             settings.pheromone_decay_factor(),
             true,
-            Some(Box::new(pheromones::generate_circular_static_gradient)),
+            Some(Box::new(pheromones::generate_linear_static_gradient)),
         )));
 
         let gradient = colorgrad::viridis();
@@ -154,7 +154,7 @@ DECAY_FACTOR	{:?}
         // regardless of how fast the program is actually running. Right now it just affects agent speed.
         let delta_t = self.frame_time;
 
-        agents.iter_mut().for_each(|agent| {
+        agents.par_iter_mut().for_each(|agent| {
             let pheromones = pheromones
                 .read()
                 .expect("reading pheromones during agent update");
@@ -196,6 +196,9 @@ DECAY_FACTOR	{:?}
             .pheromones
             .read()
             .expect("couldn't get lock on pheromones for draw")
+            // Uncomment to enable rendering of the static gradient for debugging
+            // .static_gradient()
+            // .unwrap()
             .iter()
             .map(ToOwned::to_owned)
             .collect();

@@ -244,7 +244,7 @@ pub fn move_in_direction_of_heading(
 ) {
     let heading_in_radians = heading.to_radians();
 
-    move_relative_wrapping(
+    move_relative_clamping(
         location,
         delta_t * speed * heading_in_radians.sin(),
         delta_t * speed * heading_in_radians.cos(),
@@ -263,9 +263,26 @@ pub fn move_relative_wrapping(xy: &mut Point2<f64>, x: f64, y: f64, boundary_rec
     }
 
     if xy.y >= boundary_rect.y_max() as f64 {
-        xy.x = xy.x - boundary_rect.y_max() as f64;
+        xy.y = xy.y - boundary_rect.y_max() as f64;
     } else if xy.y < boundary_rect.y_min() as f64 {
-        xy.x = xy.x + boundary_rect.y_max() as f64;
+        xy.y = xy.y + boundary_rect.y_max() as f64;
+    }
+}
+
+pub fn move_relative_clamping(xy: &mut Point2<f64>, x: f64, y: f64, boundary_rect: &Rect<u32>) {
+    xy.x += x;
+    xy.y += y;
+
+    if xy.x > boundary_rect.x_max() as f64 {
+        xy.x = boundary_rect.x_max() as f64;
+    } else if xy.x < boundary_rect.x_min() as f64 {
+        xy.x = boundary_rect.x_min() as f64;
+    }
+
+    if xy.y > boundary_rect.y_max() as f64 {
+        xy.y = boundary_rect.y_max() as f64;
+    } else if xy.y < boundary_rect.y_min() as f64 {
+        xy.y = boundary_rect.y_min() as f64;
     }
 }
 
