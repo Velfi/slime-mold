@@ -1,8 +1,8 @@
 use crate::{Agent, Point2, Swapper};
-use image::io::Reader as ImageReader;
-use image::GrayImage;
+use image::{io::Reader as ImageReader, GrayImage};
 use imageproc::filter::*;
 use log::{debug, trace};
+use std::path::Path;
 
 pub struct Pheromones {
     grid: Swapper<GrayImage>,
@@ -136,6 +136,14 @@ impl Pheromones {
     pub fn iter(&self) -> impl Iterator<Item = &u8> {
         self.grid.a().iter()
     }
+
+    pub fn enable_dynamic_gradient(&mut self) {
+        self.enable_dynamic_gradient = true;
+    }
+
+    pub fn disable_dynamic_gradient(&mut self) {
+        self.enable_dynamic_gradient = false;
+    }
 }
 
 pub trait StaticGradientGenerator {
@@ -210,9 +218,14 @@ pub fn generate_linear_static_gradient(width: u32, height: u32) -> GrayImage {
     GrayImage::from_raw(width, height, vec).unwrap()
 }
 
-// TODO figure out how to make a HOF that can generate new functions for arbitrary images instead of having a hardcoded image path
-pub fn generate_image_based_static_gradient(width: u32, height: u32) -> GrayImage {
-    let river_img = ImageReader::open("images/girl.png")
+// Warp this in a closure in order to pass it in when building a `Pheromones`
+// e.g. `|width: u32, height: u32| pheromones::generate_image_based_static_gradient(width, height, "images/slime.png")`
+pub fn generate_image_based_static_gradient(
+    width: u32,
+    height: u32,
+    image_path: impl AsRef<Path>,
+) -> GrayImage {
+    let river_img = ImageReader::open(image_path)
         .expect("loading image file")
         .decode()
         .expect("decoding image file");

@@ -54,10 +54,7 @@ fn main() -> Result<(), SlimeError> {
     let mut input = WinitInputHelper::new();
 
     let window = {
-        let size = LogicalSize::new(
-            settings.window_width() as f64,
-            settings.window_height() as f64,
-        );
+        let size = LogicalSize::new(settings.window_width as f64, settings.window_height as f64);
         WindowBuilder::new()
             .with_title("Slime Mold")
             .with_inner_size(size)
@@ -66,14 +63,13 @@ fn main() -> Result<(), SlimeError> {
             .unwrap()
     };
 
-    if settings.window_fullscreen() {
+    if settings.window_fullscreen {
         window.set_fullscreen(Some(Fullscreen::Borderless(window.current_monitor())));
     }
 
     debug!(
         "opening {} by {} window",
-        settings.window_width(),
-        settings.window_height()
+        settings.window_width, settings.window_height
     );
 
     let mut pixels = {
@@ -84,8 +80,8 @@ fn main() -> Result<(), SlimeError> {
         );
         let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
         Pixels::new(
-            settings.window_width(),
-            settings.window_height(),
+            settings.window_width,
+            settings.window_height,
             surface_texture,
         )?
     };
@@ -173,6 +169,10 @@ fn main() -> Result<(), SlimeError> {
             // Toggle B/W mode
             if input.key_pressed(VirtualKeyCode::B) {
                 world.toggle_black_and_white_mode();
+            }
+
+            if input.key_pressed(VirtualKeyCode::D) {
+                world.toggle_dynamic_gradient();
             }
 
             // Resize the window

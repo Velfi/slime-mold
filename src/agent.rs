@@ -64,21 +64,21 @@ impl Default for AgentUpdate {
 impl Agent {
     pub fn new_from_settings(settings: &Settings) -> Self {
         let mut rng: StdRng = SeedableRng::from_entropy();
-        let deposition_amount = settings.agent_deposition_amount();
-        let move_speed = rng.gen_range(settings.agent_speed_min()..settings.agent_speed_max());
+        let deposition_amount = settings.agent_deposition_amount;
+        let move_speed = rng.gen_range(settings.agent_speed_min..settings.agent_speed_max);
         let location = Point2::new(
-            rng.gen_range(0.0..(settings.window_width() as f64)),
-            rng.gen_range(0.0..(settings.window_height() as f64)),
+            rng.gen_range(0.0..(settings.window_width as f64)),
+            rng.gen_range(0.0..(settings.window_height as f64)),
         );
-        let heading = rng.gen_range(settings.agent_possible_starting_headings().clone());
+        let heading = rng.gen_range(settings.agent_possible_starting_headings.clone());
 
         Agent::builder()
             .location(location)
             .heading(heading)
             .move_speed(move_speed)
-            .jitter(settings.agent_jitter())
+            .jitter(settings.agent_jitter)
             .deposition_amount(deposition_amount)
-            .rotation_speed(settings.agent_turn_speed())
+            .rotation_speed(settings.agent_turn_speed)
             .rng(SeedableRng::from_entropy())
             .build()
     }

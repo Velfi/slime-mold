@@ -25,18 +25,19 @@ pub const DECAY_FACTOR: u8 = u8::MIN;
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
-    window_width: u32,
-    window_height: u32,
-    window_fullscreen: bool,
-    agent_count: usize,
-    agent_count_maximum: usize,
-    agent_jitter: f64,
-    agent_speed_min: f64,
-    agent_speed_max: f64,
-    agent_turn_speed: f64,
-    agent_possible_starting_headings: Range<f64>,
-    agent_deposition_amount: u8,
-    pheromone_decay_factor: u8,
+    pub window_width: u32,
+    pub window_height: u32,
+    pub window_fullscreen: bool,
+    pub agent_count: usize,
+    pub agent_count_maximum: usize,
+    pub agent_jitter: f64,
+    pub agent_speed_min: f64,
+    pub agent_speed_max: f64,
+    pub agent_turn_speed: f64,
+    pub agent_possible_starting_headings: Range<f64>,
+    pub agent_deposition_amount: u8,
+    pub pheromone_decay_factor: u8,
+    pub pheromone_enable_dynamic_gradient: bool,
 }
 
 impl Default for Settings {
@@ -54,6 +55,7 @@ impl Default for Settings {
             agent_possible_starting_headings: AGENT_POSSIBLE_STARTING_HEADINGS,
             agent_deposition_amount: DEPOSITION_AMOUNT,
             pheromone_decay_factor: DECAY_FACTOR,
+            pheromone_enable_dynamic_gradient: true,
         }
     }
 }
@@ -85,53 +87,6 @@ impl Settings {
 
     pub fn did_pheromone_settings_change(&self, other: &Self) -> bool {
         self.pheromone_decay_factor != other.pheromone_decay_factor
-    }
-
-    pub fn window_width(&self) -> u32 {
-        self.window_width
-    }
-
-    pub fn window_height(&self) -> u32 {
-        self.window_height
-    }
-
-    pub fn window_fullscreen(&self) -> bool {
-        self.window_fullscreen
-    }
-
-    pub fn agent_count(&self) -> usize {
-        self.agent_count
-    }
-
-    pub fn agent_count_maximum(&self) -> usize {
-        self.agent_count_maximum
-    }
-
-    pub fn agent_jitter(&self) -> f64 {
-        self.agent_jitter
-    }
-
-    pub fn agent_speed_min(&self) -> f64 {
-        self.agent_speed_min
-    }
-
-    pub fn agent_speed_max(&self) -> f64 {
-        self.agent_speed_max
-    }
-
-    pub fn agent_turn_speed(&self) -> f64 {
-        self.agent_turn_speed
-    }
-
-    pub fn agent_possible_starting_headings(&self) -> &Range<f64> {
-        &self.agent_possible_starting_headings
-    }
-
-    pub fn agent_deposition_amount(&self) -> u8 {
-        self.agent_deposition_amount
-    }
-
-    pub fn pheromone_decay_factor(&self) -> u8 {
-        self.pheromone_decay_factor
+            || self.pheromone_enable_dynamic_gradient != other.pheromone_enable_dynamic_gradient
     }
 }

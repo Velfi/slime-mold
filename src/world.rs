@@ -1,7 +1,7 @@
 use crate::{
     agent::{Agent, AgentUpdate},
     errors::SlimeError,
-    pheromones::{self, Pheromones},
+    pheromones::{generate_image_based_static_gradient, Pheromones},
     rect::Rect,
     settings::Settings,
     util::map_range,
@@ -26,7 +26,7 @@ pub struct World {
 impl World {
     /// Create a new `World` instance that can draw a moving box.
     pub fn new(settings: Settings) -> Self {
-        info!("generating {} agents", settings.agent_count());
+        info!("generating {} agents", settings.agent_count);
         info!(
             r#"
 AGENT_COUNT_MAX	{:?}
@@ -37,33 +37,35 @@ AGENT_TURN_SPEED	{:?}
 AGENT_POSSIBLE_STRT_HDGS	{:?}
 DEPOSITION_AMOUN	{:?}
 DECAY_FACTOR	{:?}
+ENABLE_DYN_GRAD	{:?}
 "#,
-            settings.agent_count_maximum(),
-            settings.agent_jitter(),
-            settings.agent_speed_min(),
-            settings.agent_speed_max(),
-            settings.agent_turn_speed(),
-            settings.agent_possible_starting_headings(),
-            settings.agent_deposition_amount(),
-            settings.pheromone_decay_factor(),
+            settings.agent_count_maximum,
+            settings.agent_jitter,
+            settings.agent_speed_min,
+            settings.agent_speed_max,
+            settings.agent_turn_speed,
+            settings.agent_possible_starting_headings,
+            settings.agent_deposition_amount,
+            settings.pheromone_decay_factor,
+            settings.pheromone_enable_dynamic_gradient,
         );
 
-        let agents: Vec<_> = (0..settings.agent_count())
+        let agents: Vec<_> = (0..settings.agent_count)
             .into_iter()
             .map(|_| Agent::new_from_settings(&settings))
             .collect();
 
         let pheromones = Arc::new(RwLock::new(Pheromones::new(
-            settings.window_width(),
-            settings.window_height(),
-            settings.pheromone_decay_factor(),
-            true,
-            Some(Box::new(pheromones::generate_image_based_static_gradient)),
+            settings.window_width,
+            settings.window_height,
+            settings.pheromone_decay_factor,
+            settings.pheromone_enable_dynamic_gradient,
+            None,
         )));
 
         let gradient = colorgrad::viridis();
 
-        let boundary_rect = Rect::new(0, 0, settings.window_width(), settings.window_height());
+        let boundary_rect = Rect::new(0, 0, settings.window_width, settings.window_height);
 
         Self {
             agents,
@@ -102,8 +104,8 @@ DECAY_FACTOR	{:?}
             }
         }
 
-        if self.agents.len() < self.settings.agent_count() {
-            (self.agents.len()..self.settings.agent_count())
+        if self.agents.len() < self.settings.agent_count {
+            (self.agents.len()..self.settings.agent_count)
                 .for_each(|_| self.agents.push(Agent::new_from_settings(&self.settings)));
         }
 
@@ -118,15 +120,22 @@ DECAY_FACTOR	{:?}
         self.black_and_white_mode = !self.black_and_white_mode
     }
 
+    pub fn toggle_dynamic_gradient(&mut self) {
+        self.settings.pheromone_enable_dynamic_gradient =
+            !self.settings.pheromone_enable_dynamic_gradient;
+
+        let _ = self.refresh_pheromones_from_settings();
+    }
+
     fn refresh_agents_from_settings(&mut self) -> Result<(), SlimeError> {
         let agent_update = AgentUpdate {
-            jitter: Some(self.settings.agent_jitter()),
-            rotation_speed: Some(self.settings.agent_turn_speed()),
-            deposition_amount: Some(self.settings.agent_deposition_amount()),
+            jitter: Some(self.settings.agent_jitter),
+            rotation_speed: Some(self.settings.agent_turn_speed),
+            deposition_amount: Some(self.settings.agent_deposition_amount),
             ..Default::default()
         };
 
-        let move_speed_range = self.settings.agent_speed_min()..self.settings.agent_speed_max();
+        let move_speed_range = self.settings.agent_speed_min..self.settings.agent_speed_max;
 
         self.agents.iter_mut().for_each(|agent| {
             agent.apply_update(&agent_update);
@@ -137,12 +146,20 @@ DECAY_FACTOR	{:?}
     }
 
     fn refresh_pheromones_from_settings(&mut self) -> Result<(), SlimeError> {
-        self.pheromones
+        let mut pheromones = self
+            .pheromones
             .write()
-            .map(|mut pheromones| {
-                pheromones.set_decay_factor(self.settings.pheromone_decay_factor())
-            })
-            .map_err(|e| SlimeError::ThreadSafety(e.to_string()))
+            .map_err(|e| SlimeError::ThreadSafety(e.to_string()))?;
+
+        if self.settings.pheromone_enable_dynamic_gradient {
+            pheromones.enable_dynamic_gradient();
+        } else {
+            pheromones.disable_dynamic_gradient();
+        }
+
+        pheromones.set_decay_factor(self.settings.pheromone_decay_factor);
+
+        Ok(())
     }
 
     /// Update the `World` internal state; bounce the box around the screen.
@@ -179,8 +196,8 @@ DECAY_FACTOR	{:?}
             .expect("couldn't get mut ref to pheromones for decay step")
             .decay();
 
-        if self.agents.len() > self.settings.agent_count_maximum() {
-            self.agents.truncate(self.settings.agent_count_maximum())
+        if self.agents.len() > self.settings.agent_count_maximum {
+            self.agents.truncate(self.settings.agent_count_maximum)
         }
     }
 

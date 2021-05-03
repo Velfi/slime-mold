@@ -22,5 +22,6 @@
   },
   // Pheromone settings
   "agentDepositionAmount": 255,
-  "pheromoneDecayFactor": 2
+  "pheromoneDecayFactor": 2,
+  "pheromoneEnableDynamicGradient": true
 }
