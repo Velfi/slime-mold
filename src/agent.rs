@@ -4,6 +4,7 @@ use crate::{Pheromones, Point2, rect::Rect, settings::Settings};
 use log::trace;
 use num::{Float, NumCast};
 use rand::prelude::*;
+use rand::rngs::StdRng;
 use typed_builder::TypedBuilder;
 
 pub type SensorReading = (i32, i32, i32);
@@ -29,9 +30,8 @@ pub struct Agent {
     // The tendency of agents to move erratically
     #[builder(default = 0.0f64)]
     jitter: f64,
-    #[builder(default = SeedableRng::from_entropy())]
+    #[builder(default = default_rng())]
     rng: StdRng,
-    #[builder()]
     deposition_amount: u8,
 }
 
@@ -49,14 +49,14 @@ pub struct AgentUpdate {
 
 impl Agent {
     pub fn new_from_settings(settings: &Settings) -> Self {
-        let mut rng: StdRng = SeedableRng::from_entropy();
+        let mut rng: StdRng = StdRng::from_os_rng();
         let deposition_amount = settings.agent_deposition_amount;
-        let move_speed = rng.gen_range(settings.agent_speed_min..settings.agent_speed_max);
+        let move_speed = rng.random_range(settings.agent_speed_min..settings.agent_speed_max);
         let location = Point2::new(
-            rng.gen_range(0.0..(settings.window_width as f64)),
-            rng.gen_range(0.0..(settings.window_height as f64)),
+            rng.random_range(0.0..(settings.window_width as f64)),
+            rng.random_range(0.0..(settings.window_height as f64)),
         );
-        let heading = rng.gen_range(settings.agent_possible_starting_headings.clone());
+        let heading = rng.random_range(settings.agent_possible_starting_headings.clone());
 
         Agent::builder()
             .location(location)
@@ -65,7 +65,7 @@ impl Agent {
             .jitter(settings.agent_jitter)
             .deposition_amount(deposition_amount)
             .rotation_speed(settings.agent_turn_speed)
-            .rng(SeedableRng::from_entropy())
+            .rng(StdRng::from_os_rng())
             .build()
     }
 
@@ -90,7 +90,7 @@ impl Agent {
             0.0
         } else if c_reading < l_reading && c_reading < r_reading {
             // rotate randomly to the left or right
-            let should_rotate_right: bool = self.rng.r#gen();
+            let should_rotate_right: bool = self.rng.random();
 
             if should_rotate_right {
                 trace!("Agent is rotating randomly to the right");
@@ -122,7 +122,7 @@ impl Agent {
     }
 
     pub fn set_new_random_move_speed_in_range(&mut self, move_speed_range: Range<f64>) {
-        self.move_speed = self.rng.gen_range(move_speed_range);
+        self.move_speed = self.rng.random_range(move_speed_range);
         trace!("set agent's speed to {}", self.move_speed);
     }
 
@@ -168,10 +168,10 @@ impl Agent {
 
     pub fn rotate(&mut self, mut rotation_in_degrees: f64) {
         if self.jitter != 0.0 {
-            let magnitude = if self.rng.r#gen() {
-                self.rng.r#gen::<f64>()
+            let magnitude = if self.rng.random() {
+                self.rng.random::<f64>()
             } else {
-                self.rng.r#gen::<f64>() * -1.0
+                self.rng.random::<f64>() * -1.0
             };
             // Randomly adjust rotation amount
             rotation_in_degrees += self.jitter * magnitude;
@@ -277,6 +277,10 @@ pub fn move_relative_clamping(xy: &mut Point2<f64>, x: f64, y: f64, boundary_rec
     } else if xy.y < boundary_rect.y_min() as f64 {
         xy.y = boundary_rect.y_min() as f64;
     }
+}
+
+fn default_rng() -> StdRng {
+    StdRng::from_os_rng()
 }
 
 #[cfg(test)]

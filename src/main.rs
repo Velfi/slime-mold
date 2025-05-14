@@ -12,8 +12,7 @@ mod world;
 
 pub use agent::Agent;
 use circular_queue::CircularQueue;
-use errors::SlimeError;
-use log::{debug, error, info, trace};
+use log::{error, info, trace};
 #[cfg(feature = "midi")]
 use midi::{MidiInterface, MidiMessage};
 #[cfg(target_os = "macos")]
@@ -31,67 +30,45 @@ use std::path::Path;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 pub use swapper::Swapper;
-use winit::{
-    dpi::LogicalSize,
-    event::{Event, VirtualKeyCode},
-    event_loop::{ControlFlow, EventLoop},
-    window::Fullscreen,
-    window::WindowBuilder,
-};
+use winit::{event::Event, event_loop::EventLoop, keyboard::KeyCode};
 use winit_input_helper::WinitInputHelper;
 use world::World;
 
-pub const DEFAULT_SETTINGS_FILE: &str = "simulation_settings.hjson";
+pub const DEFAULT_SETTINGS_FILE: &str = "simulation_settings.toml";
 
-fn main() -> Result<(), SlimeError> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenv::dotenv();
     env_logger::init();
-    let settings = Settings::load_from_file(DEFAULT_SETTINGS_FILE)?;
+    let initial_settings = Settings::load_from_file(DEFAULT_SETTINGS_FILE)?;
     let (settings_update_receiver, _settings_update_watcher) =
         setup_settings_file_watcher(DEFAULT_SETTINGS_FILE);
 
-    let event_loop = EventLoop::new();
+    let event_loop = EventLoop::new().unwrap();
     let mut input = WinitInputHelper::new();
 
-    let window = {
-        let size = LogicalSize::new(settings.window_width as f64, settings.window_height as f64);
-        WindowBuilder::new()
-            .with_title("Slime Mold")
-            .with_inner_size(size)
-            .with_min_inner_size(size)
-            .build(&event_loop)
-            .unwrap()
-    };
-
-    if settings.window_fullscreen {
-        window.set_fullscreen(Some(Fullscreen::Borderless(window.current_monitor())));
-    }
-
-    debug!(
-        "opening {} by {} window",
-        settings.window_width, settings.window_height
-    );
-
-    let mut pixels = {
-        let window_size = window.inner_size();
-        debug!(
-            "creating {} by {} surface_texture",
-            window_size.width, window_size.height
-        );
-        let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
-        Pixels::new(
-            settings.window_width,
-            settings.window_height,
-            surface_texture,
-        )?
-    };
+    let window = winit::window::WindowBuilder::new()
+        .with_title("Slime Mold")
+        .with_inner_size(winit::dpi::PhysicalSize::new(
+            initial_settings.window_width,
+            initial_settings.window_height,
+        ))
+        .build(&event_loop)?;
+    let mut pixels = Pixels::new(
+        initial_settings.window_width,
+        initial_settings.window_height,
+        SurfaceTexture::new(
+            initial_settings.window_width,
+            initial_settings.window_height,
+            &window,
+        ),
+    )?;
 
     #[cfg(feature = "midi")]
     let mut midi_interface = MidiInterface::new(Some("Summit"))?;
     #[cfg(feature = "midi")]
     midi_interface.open()?;
 
-    let mut world = World::new(settings);
+    let mut world = World::new(initial_settings);
 
     let mut frame_time = 0.16;
     let mut time_of_last_frame_start = Instant::now();
@@ -99,34 +76,39 @@ fn main() -> Result<(), SlimeError> {
     let mut fps_values = CircularQueue::with_capacity(5);
     let mut time_of_last_fps_counter_update = Instant::now();
 
-    event_loop.run(move |event, _, control_flow| {
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+    event_loop.run(|event, _event_loop_window_target| {
         world.set_frame_time(frame_time);
 
-        // Draw the current frame
-        if let Event::RedrawRequested(_) = event {
-            world.draw(pixels.frame_mut());
-            if pixels
-                .render()
-                .map_err(|e| error!("pixels.render() failed: {}", e))
-                .is_err()
-            {
-                *control_flow = ControlFlow::Exit;
-                return;
-            }
+        if let Event::WindowEvent {
+            event: winit::event::WindowEvent::RedrawRequested,
+            window_id,
+        } = event
+        {
+            if window_id == window.id() {
+                world.draw(pixels.frame_mut());
+                if pixels
+                    .render()
+                    .map_err(|e| error!("pixels.render() failed: {}", e))
+                    .is_err()
+                {
+                    std::process::exit(0);
+                }
 
-            frame_time = time_of_last_frame_start.elapsed().as_secs_f64();
-            time_of_last_frame_start = Instant::now();
+                frame_time = time_of_last_frame_start.elapsed().as_secs_f64();
+                time_of_last_frame_start = Instant::now();
 
-            frame_counter += 1;
+                frame_counter += 1;
 
-            if time_of_last_fps_counter_update.elapsed().as_secs() > 1 {
-                time_of_last_fps_counter_update = Instant::now();
-                let _ = fps_values.push(frame_counter);
-                frame_counter = 0;
+                if time_of_last_fps_counter_update.elapsed().as_secs() > 1 {
+                    time_of_last_fps_counter_update = Instant::now();
+                    let _ = fps_values.push(frame_counter);
+                    frame_counter = 0;
 
-                let fps_sum: i32 = fps_values.iter().sum();
-                let avg_fps = fps_sum as f64 / fps_values.len() as f64;
-                info!("FPS {}", avg_fps.trunc());
+                    let fps_sum: i32 = fps_values.iter().sum();
+                    let avg_fps = fps_sum as f64 / fps_values.len() as f64;
+                    info!("FPS {}", avg_fps.trunc());
+                }
             }
         }
 
@@ -158,34 +140,25 @@ fn main() -> Result<(), SlimeError> {
             }
         }
 
-        // Handle input events
         if input.update(&event) {
-            // Close events
-            if input.key_pressed(VirtualKeyCode::Escape)
-                || input.close_requested()
-                || input.destroyed()
-            {
-                *control_flow = ControlFlow::Exit;
-                return;
+            if input.key_pressed(KeyCode::Escape) || input.close_requested() || input.destroyed() {
+                std::process::exit(0);
             }
 
-            // Toggle B/W mode
-            if input.key_pressed(VirtualKeyCode::B) {
+            if input.key_pressed(KeyCode::KeyB) {
                 world.toggle_black_and_white_mode();
             }
 
-            if input.key_pressed(VirtualKeyCode::D) {
+            if input.key_pressed(KeyCode::KeyD) {
                 world.toggle_dynamic_gradient();
             }
 
-            // Resize the window
             if let Some(size) = input.window_resized() {
                 pixels
                     .resize_surface(size.width, size.height)
                     .expect("couldn't resize surface");
             }
 
-            // Update internal state and request a redraw
             world.update();
             window.request_redraw();
         }
@@ -198,12 +171,14 @@ fn main() -> Result<(), SlimeError> {
                 }
             }
             Err(e) => {
-                // This error is expected because the file typically doesn't change much
                 trace!("settings_update_receiver watch error: {:?}", e);
             }
         }
-    });
+    })?;
+
+    Ok(())
 }
+
 #[cfg(target_os = "windows")]
 fn setup_settings_file_watcher(
     path: impl AsRef<Path>,

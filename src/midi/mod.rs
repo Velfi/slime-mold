@@ -9,7 +9,7 @@ pub use summit::SummitController;
 // Notes on my synth are in the 36 to 96 range by default
 // vel ranges from 0 to 127
 fn new_agent_from_midi(key: u8, vel: u8) -> Agent {
-    let mut rng: StdRng = SeedableRng::from_entropy();
+    let mut rng: StdRng = StdRng::from_os_rng();
     let move_speed = rng.gen_range(AGENT_SPEED_MIN..AGENT_SPEED_MAX);
     let location = Point2::new(
         map_range(key as f64, 36.0, 96.0, 0.0, WIDTH as f64),

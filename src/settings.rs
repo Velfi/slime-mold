@@ -22,7 +22,7 @@ pub const DEPOSITION_AMOUNT: u8 = u8::MAX;
 /// Represents the rate at which pheromone signals disappear. A typical decay factor is 1/100 the rate of deposition
 pub const DECAY_FACTOR: u8 = u8::MIN;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     pub window_width: u32,
@@ -62,16 +62,18 @@ impl Default for Settings {
 
 impl Settings {
     pub fn load_from_file(settings_file_name: &str) -> Result<Self, SlimeError> {
-        let mut settings = config::Config::default();
-        settings.merge(config::File::with_name(settings_file_name))?;
-        let settings = settings.try_into();
+        let settings = config::Config::builder()
+            .add_source(config::File::with_name(settings_file_name))
+            .build()
+            .map_err(SlimeError::from)?;
+        let settings = settings.try_deserialize().map_err(SlimeError::from)?;
 
         info!(
             "successfully loaded settings from '{}'",
             &settings_file_name
         );
 
-        settings.map_err(SlimeError::from)
+        Ok(settings)
     }
 
     pub fn did_agent_settings_change(&self, other: &Self) -> bool {

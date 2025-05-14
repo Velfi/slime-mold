@@ -7,7 +7,7 @@ use crate::{
     settings::Settings,
     util::map_range,
 };
-use colorgrad::Gradient;
+use colorgrad::preset::viridis;
 use log::{error, info};
 use rayon::prelude::*;
 use std::sync::{Arc, RwLock};
@@ -15,7 +15,7 @@ use std::sync::{Arc, RwLock};
 pub struct World {
     agents: Vec<Agent>,
     frame_time: f64,
-    gradient: Gradient,
+    gradient: Arc<Box<dyn colorgrad::Gradient + Sync + Send>>,
     pheromones: Arc<RwLock<Pheromones>>,
     /// A toggle for rendering in color vs. black & white mode. Color mode has an FPS cost so we render in B&W by default
     black_and_white_mode: bool,
@@ -62,7 +62,7 @@ ENABLE_DYN_GRAD	{:?}
             None,
         )));
 
-        let gradient = colorgrad::viridis();
+        let gradient = Arc::new(Box::new(viridis()) as Box<dyn colorgrad::Gradient + Sync + Send>);
 
         let boundary_rect = Rect::new(0, 0, settings.window_width, settings.window_height);
 
@@ -206,7 +206,7 @@ ENABLE_DYN_GRAD	{:?}
     /// Assumes that pheromone grid and pixel FB have same dimensions
     pub fn draw(&self, frame: &mut [u8]) {
         let pixel_iter = frame.par_chunks_exact_mut(4);
-        let gradient = &self.gradient;
+        let gradient = Arc::clone(&self.gradient);
         // TODO Grid doesn't support parallel iterators, what do?
         let pheromones: Vec<_> = self
             .pheromones
@@ -239,8 +239,8 @@ ENABLE_DYN_GRAD	{:?}
                         0.0,
                         1.0,
                     );
-                    let (r, g, b, a) = gradient.at(pheromone_value).rgba_u8();
-                    pixel.copy_from_slice(&[r, g, b, a]);
+                    let rgba = gradient.at(pheromone_value).to_rgba8();
+                    pixel.copy_from_slice(&rgba);
                 }
             });
     }

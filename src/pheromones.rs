@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::{Agent, Point2, Swapper};
-use image::{GrayImage, io::Reader as ImageReader};
+use image::{GrayImage, ImageReader};
 use imageproc::filter::*;
 use log::{debug, trace};
 use std::path::Path;

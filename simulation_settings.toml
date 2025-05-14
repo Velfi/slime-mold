@@ -1,0 +1,27 @@
+# This is TOML
+# Copy this and start editing it to save your own personal settings
+
+# General settings
+# I'm not yet sure how I want to handle resizes
+windowWidth = 1000
+windowHeight = 1000
+windowFullscreen = false
+
+# Agent settings
+agentCount = 10000
+# If you want to delete all agents while the sim is running, set this to zero and back again
+agentCountMaximum = 10000
+agentJitter = 5.0
+# Min must always be < Max
+agentSpeedMin = 10.0
+agentSpeedMax = 20.0
+agentTurnSpeed = 10.0
+
+# Pheromone settings
+agentDepositionAmount = 255
+pheromoneDecayFactor = 2
+pheromoneEnableDynamicGradient = true
+
+[agentPossibleStartingHeadings]
+start = 0.0
+end = 360.0
