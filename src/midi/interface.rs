@@ -1,8 +1,8 @@
 use crate::errors::SlimeError;
 use log::{error, info, trace, warn};
 use midir::{Ignore, MidiInput, MidiInputConnection, MidiInputPort};
-use midly::{live::LiveEvent, MidiMessage};
-use std::io::{stdin, stdout, Write};
+use midly::{MidiMessage, live::LiveEvent};
+use std::io::{Write, stdin, stdout};
 use std::sync::mpsc;
 use std::{mem, sync::mpsc::Receiver};
 
@@ -140,7 +140,9 @@ impl MidiInterface {
             let i: Vec<_> = rcv.try_iter().collect();
             Box::new(i.into_iter())
         } else {
-            warn!("No MIDI event receiver has been opened. Please open the MidiInterface before checking for pending events");
+            warn!(
+                "No MIDI event receiver has been opened. Please open the MidiInterface before checking for pending events"
+            );
             Box::new(std::iter::empty())
         };
 

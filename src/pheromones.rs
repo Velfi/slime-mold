@@ -1,5 +1,7 @@
+#![allow(dead_code)]
+
 use crate::{Agent, Point2, Swapper};
-use image::{io::Reader as ImageReader, GrayImage};
+use image::{GrayImage, io::Reader as ImageReader};
 use imageproc::filter::*;
 use log::{debug, trace};
 use std::path::Path;
@@ -118,7 +120,7 @@ impl Pheromones {
 
     pub fn diffuse(&mut self) {
         let (grid_a, grid_b) = self.grid.read_a_write_b();
-        *grid_b = box_filter(&grid_a, 1, 1);
+        *grid_b = box_filter(grid_a, 1, 1);
         self.grid.swap()
     }
 
@@ -157,16 +159,14 @@ pub fn generate_circular_static_gradient(width: u32, height: u32) -> GrayImage {
     let root_2 = 2.0f64.sqrt();
 
     let vec: Vec<_> = (0..width)
-        .into_iter()
-        .map(|x| (0..height).into_iter().map(move |y| (x as f64, y as f64)))
-        .flatten()
+        .flat_map(|x| (0..height).map(move |y| (x as f64, y as f64)))
         .map(|(x, y)| {
             let width = width as f64;
             let height = height as f64;
             let mut distance_to_center =
                 ((x - width / 2.0).powi(2) + (y - height / 2.0).powi(2)).sqrt();
 
-            distance_to_center = distance_to_center / (root_2 * width / 2.0);
+            distance_to_center /= root_2 * width / 2.0;
 
             let t = min_value * distance_to_center + max_value * (1.0 - distance_to_center);
 
@@ -193,9 +193,7 @@ pub fn generate_linear_static_gradient(width: u32, height: u32) -> GrayImage {
     let c: f64 = width as f64 - (width as f64 / 4.0);
 
     let vec: Vec<_> = (0..width)
-        .into_iter()
-        .map(|x| (0..height).into_iter().map(move |y| (x as f64, y as f64)))
-        .flatten()
+        .flat_map(|x| (0..height).map(move |y| (x as f64, y as f64)))
         .map(|(x, y)| {
             let width = width as f64;
 

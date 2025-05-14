@@ -1,11 +1,11 @@
 use crate::{
+    DEFAULT_SETTINGS_FILE,
     agent::{Agent, AgentUpdate},
     errors::SlimeError,
-    pheromones::{generate_image_based_static_gradient, Pheromones},
+    pheromones::Pheromones,
     rect::Rect,
     settings::Settings,
     util::map_range,
-    DEFAULT_SETTINGS_FILE,
 };
 use colorgrad::Gradient;
 use log::{error, info};
@@ -51,7 +51,6 @@ ENABLE_DYN_GRAD	{:?}
         );
 
         let agents: Vec<_> = (0..settings.agent_count)
-            .into_iter()
             .map(|_| Agent::new_from_settings(&settings))
             .collect();
 
@@ -79,7 +78,7 @@ ENABLE_DYN_GRAD	{:?}
     }
 
     pub fn reload_settings(&mut self) -> Result<(), SlimeError> {
-        let new_settings = Settings::load_from_file(&DEFAULT_SETTINGS_FILE)?;
+        let new_settings = Settings::load_from_file(DEFAULT_SETTINGS_FILE)?;
         let agent_settings_changed = self.settings.did_agent_settings_change(&new_settings);
         let pheromone_settings_changed = self.settings.did_pheromone_settings_change(&new_settings);
         self.settings = new_settings;
@@ -225,7 +224,7 @@ ENABLE_DYN_GRAD	{:?}
             .for_each(|(pixel, pheromone_value)| {
                 // clamp to renderable range
                 // map cell pheromone values to rgba pixels
-                if self.black_and_white_mode == true {
+                if self.black_and_white_mode {
                     pixel.copy_from_slice(&[
                         *pheromone_value,
                         *pheromone_value,
@@ -235,8 +234,8 @@ ENABLE_DYN_GRAD	{:?}
                 } else {
                     let pheromone_value = map_range(
                         *pheromone_value as f64,
-                        std::u8::MIN as f64,
-                        std::u8::MAX as f64,
+                        u8::MIN as f64,
+                        u8::MAX as f64,
                         0.0,
                         1.0,
                     );

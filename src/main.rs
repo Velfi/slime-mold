@@ -22,7 +22,7 @@ use notify::FsEventWatcher;
 use notify::INotifyWatcher;
 #[cfg(target_os = "windows")]
 use notify::ReadDirectoryChangesWatcher;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{RecursiveMode, Watcher};
 use pheromones::Pheromones;
 use pixels::{Pixels, SurfaceTexture};
 pub use point2::Point2;
@@ -46,9 +46,9 @@ pub const DEFAULT_SETTINGS_FILE: &str = "simulation_settings.hjson";
 fn main() -> Result<(), SlimeError> {
     let _ = dotenv::dotenv();
     env_logger::init();
-    let settings = Settings::load_from_file(&DEFAULT_SETTINGS_FILE)?;
+    let settings = Settings::load_from_file(DEFAULT_SETTINGS_FILE)?;
     let (settings_update_receiver, _settings_update_watcher) =
-        setup_settings_file_watcher(&DEFAULT_SETTINGS_FILE);
+        setup_settings_file_watcher(DEFAULT_SETTINGS_FILE);
 
     let event_loop = EventLoop::new();
     let mut input = WinitInputHelper::new();
@@ -222,11 +222,11 @@ fn setup_settings_file_watcher(
     path: impl AsRef<Path>,
 ) -> (Receiver<notify::Result<notify::Event>>, FsEventWatcher) {
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut watcher: RecommendedWatcher = Watcher::new_immediate(move |res| tx.send(res).unwrap())
+    let mut watcher: FsEventWatcher = notify::recommended_watcher(move |res| tx.send(res).unwrap())
         .expect("couldn't create file change watcher");
 
     watcher
-        .watch(path, RecursiveMode::Recursive)
+        .watch(path.as_ref(), RecursiveMode::Recursive)
         .expect("couldn't start file change watcher");
 
     (rx, watcher)

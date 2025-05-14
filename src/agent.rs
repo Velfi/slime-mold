@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crate::{rect::Rect, settings::Settings, Pheromones, Point2};
+use crate::{Pheromones, Point2, rect::Rect, settings::Settings};
 use log::trace;
 use num::{Float, NumCast};
 use rand::prelude::*;
@@ -35,6 +35,7 @@ pub struct Agent {
     deposition_amount: u8,
 }
 
+#[derive(Default)]
 pub struct AgentUpdate {
     pub location: Option<Point2<f64>>,
     pub heading: Option<f64>,
@@ -44,21 +45,6 @@ pub struct AgentUpdate {
     pub rotation_speed: Option<f64>,
     pub jitter: Option<f64>,
     pub deposition_amount: Option<u8>,
-}
-
-impl Default for AgentUpdate {
-    fn default() -> Self {
-        AgentUpdate {
-            location: None,
-            heading: None,
-            sensor_angle: None,
-            sensor_distance: None,
-            move_speed: None,
-            rotation_speed: None,
-            jitter: None,
-            deposition_amount: None,
-        }
-    }
 }
 
 impl Agent {
@@ -84,7 +70,7 @@ impl Agent {
     }
 
     pub fn update(&mut self, pheromones: &Pheromones, delta_t: f64, boundary_rect: &Rect<u32>) {
-        let sensory_input = self.sense(&pheromones, &boundary_rect);
+        let sensory_input = self.sense(pheromones, boundary_rect);
         let rotation_towards_sensory_input = self.judge_sensory_input(sensory_input);
         self.rotate(rotation_towards_sensory_input);
 
@@ -104,7 +90,7 @@ impl Agent {
             0.0
         } else if c_reading < l_reading && c_reading < r_reading {
             // rotate randomly to the left or right
-            let should_rotate_right: bool = self.rng.gen();
+            let should_rotate_right: bool = self.rng.r#gen();
 
             if should_rotate_right {
                 trace!("Agent is rotating randomly to the right");
@@ -142,7 +128,7 @@ impl Agent {
 
     // TODO why don't they fear the edges?
     pub fn sense(&self, pheromones: &Pheromones, boundary_rect: &Rect<u32>) -> SensorReading {
-        let mut sensor_l_location = self.location.clone();
+        let mut sensor_l_location = self.location;
         move_in_direction_of_heading(
             &mut sensor_l_location,
             rotate_by_degrees(self.heading, -self.sensor_angle),
@@ -150,7 +136,7 @@ impl Agent {
             1.0,
             boundary_rect,
         );
-        let mut sensor_c_location = self.location.clone();
+        let mut sensor_c_location = self.location;
         move_in_direction_of_heading(
             &mut sensor_c_location,
             self.heading,
@@ -158,7 +144,7 @@ impl Agent {
             1.0,
             boundary_rect,
         );
-        let mut sensor_r_location = self.location.clone();
+        let mut sensor_r_location = self.location;
         move_in_direction_of_heading(
             &mut sensor_r_location,
             rotate_by_degrees(self.heading, self.sensor_angle),
@@ -182,10 +168,10 @@ impl Agent {
 
     pub fn rotate(&mut self, mut rotation_in_degrees: f64) {
         if self.jitter != 0.0 {
-            let magnitude = if self.rng.gen() {
-                self.rng.gen::<f64>()
+            let magnitude = if self.rng.r#gen() {
+                self.rng.r#gen::<f64>()
             } else {
-                self.rng.gen::<f64>() * -1.0
+                self.rng.r#gen::<f64>() * -1.0
             };
             // Randomly adjust rotation amount
             rotation_in_degrees += self.jitter * magnitude;
@@ -196,24 +182,30 @@ impl Agent {
     }
 
     pub fn apply_update(&mut self, update: &AgentUpdate) {
-        update.location.and_then(|val| Some(self.location = val));
-        update.heading.and_then(|val| Some(self.heading = val));
-        update
-            .sensor_angle
-            .and_then(|val| Some(self.sensor_angle = val));
-        update
-            .sensor_distance
-            .and_then(|val| Some(self.sensor_distance = val));
-        update
-            .move_speed
-            .and_then(|val| Some(self.move_speed = val));
-        update
-            .rotation_speed
-            .and_then(|val| Some(self.rotation_speed = val));
-        update.jitter.and_then(|val| Some(self.jitter = val));
-        update
-            .deposition_amount
-            .and_then(|val| Some(self.deposition_amount = val));
+        if let Some(val) = update.location {
+            self.location = val;
+        }
+        if let Some(val) = update.heading {
+            self.heading = val;
+        }
+        if let Some(val) = update.sensor_angle {
+            self.sensor_angle = val;
+        }
+        if let Some(val) = update.sensor_distance {
+            self.sensor_distance = val;
+        }
+        if let Some(val) = update.move_speed {
+            self.move_speed = val;
+        }
+        if let Some(val) = update.rotation_speed {
+            self.rotation_speed = val;
+        }
+        if let Some(val) = update.jitter {
+            self.jitter = val;
+        }
+        if let Some(val) = update.deposition_amount {
+            self.deposition_amount = val;
+        }
     }
 }
 
@@ -252,20 +244,21 @@ pub fn move_in_direction_of_heading(
     );
 }
 
+#[allow(dead_code)]
 pub fn move_relative_wrapping(xy: &mut Point2<f64>, x: f64, y: f64, boundary_rect: &Rect<u32>) {
     xy.x += x;
     xy.y += y;
 
     if xy.x >= boundary_rect.x_max() as f64 {
-        xy.x = xy.x - boundary_rect.x_max() as f64;
+        xy.x -= boundary_rect.x_max() as f64;
     } else if xy.x < boundary_rect.x_min() as f64 {
-        xy.x = xy.x + boundary_rect.x_max() as f64;
+        xy.x += boundary_rect.x_max() as f64;
     }
 
     if xy.y >= boundary_rect.y_max() as f64 {
-        xy.y = xy.y - boundary_rect.y_max() as f64;
+        xy.y -= boundary_rect.y_max() as f64;
     } else if xy.y < boundary_rect.y_min() as f64 {
-        xy.y = xy.y + boundary_rect.y_max() as f64;
+        xy.y += boundary_rect.y_max() as f64;
     }
 }
 

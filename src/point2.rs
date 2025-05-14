@@ -81,26 +81,20 @@ impl<T: Default> Default for Point2<T> {
     }
 }
 
-impl Into<Point2<usize>> for Point2<f64> {
-    fn into(self) -> Point2<usize> {
+impl From<Point2<f64>> for Point2<usize> {
+    fn from(val: Point2<f64>) -> Self {
         Point2 {
-            x: self.x.round() as usize,
-            y: self.y.round() as usize,
+            x: val.x.round() as usize,
+            y: val.y.round() as usize,
         }
     }
 }
 
-impl Into<Point2<u32>> for Point2<f64> {
-    fn into(self) -> Point2<u32> {
+impl From<Point2<f64>> for Point2<u32> {
+    fn from(val: Point2<f64>) -> Self {
         Point2 {
-            x: self
-                .x
-                .round()
-                .clamp(std::u32::MIN as f64, std::u32::MAX as f64) as u32,
-            y: self
-                .y
-                .round()
-                .clamp(std::u32::MIN as f64, std::u32::MAX as f64) as u32,
+            x: val.x.round().clamp(u32::MIN as f64, u32::MAX as f64) as u32,
+            y: val.y.round().clamp(u32::MIN as f64, u32::MAX as f64) as u32,
         }
     }
 }

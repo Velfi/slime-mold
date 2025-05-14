@@ -65,7 +65,6 @@ impl Rect<u32> {
             && other.y >= self.y_min() as f64
             && other.y < self.y_max() as f64
         {
-            return;
         } else {
             let x = other
                 .x
