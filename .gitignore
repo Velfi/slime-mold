@@ -1,6 +1,5 @@
 /target
 .env
-simulation_settings.hjson
 /.vscode
 /images
 .DS_Store
