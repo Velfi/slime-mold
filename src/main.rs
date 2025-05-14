@@ -104,7 +104,7 @@ fn main() -> Result<(), SlimeError> {
 
         // Draw the current frame
         if let Event::RedrawRequested(_) = event {
-            world.draw(pixels.get_frame());
+            world.draw(pixels.frame_mut());
             if pixels
                 .render()
                 .map_err(|e| error!("pixels.render() failed: {}", e))
@@ -161,7 +161,10 @@ fn main() -> Result<(), SlimeError> {
         // Handle input events
         if input.update(&event) {
             // Close events
-            if input.key_pressed(VirtualKeyCode::Escape) || input.quit() {
+            if input.key_pressed(VirtualKeyCode::Escape)
+                || input.close_requested()
+                || input.destroyed()
+            {
                 *control_flow = ControlFlow::Exit;
                 return;
             }
@@ -177,7 +180,9 @@ fn main() -> Result<(), SlimeError> {
 
             // Resize the window
             if let Some(size) = input.window_resized() {
-                pixels.resize_surface(size.width, size.height);
+                pixels
+                    .resize_surface(size.width, size.height)
+                    .expect("couldn't resize surface");
             }
 
             // Update internal state and request a redraw
