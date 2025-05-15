@@ -74,6 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut frame_counter = 0;
     let mut fps_values = CircularQueue::with_capacity(5);
     let mut time_of_last_fps_counter_update = Instant::now();
+    let mut avg_fps = 0.0;
 
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     event_loop.run(|event, _event_loop_window_target| {
@@ -105,8 +106,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     frame_counter = 0;
 
                     let fps_sum: i32 = fps_values.iter().sum();
-                    let avg_fps = fps_sum as f64 / fps_values.len() as f64;
+                    avg_fps = fps_sum as f64 / fps_values.len() as f64;
                     info!("FPS {}", avg_fps.trunc());
+                    window.set_title(&format!("Slime Mold - FPS: {:.0}", avg_fps.trunc()));
                 }
             }
         }

@@ -32,3 +32,6 @@ typed-builder = "0.21.0"
 pixels = "0.15.0"
 winit = "0.29.0"
 winit_input_helper = "0.16.0"
+bytemuck = { version = "1.23.0", features = ["derive"] }
+wgpu = { version = "0.20.0" }
+nalgebra = "0.33.2"
