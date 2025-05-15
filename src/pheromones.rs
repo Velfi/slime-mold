@@ -1,5 +1,5 @@
-use crate::{Agent, Point2, Swapper};
-use log::{debug, trace};
+use crate::{Agent, Point2};
+use log::debug;
 use nalgebra::DMatrix;
 use pollster;
 use std::borrow::Cow;
@@ -8,232 +8,43 @@ use wgpu::util::DeviceExt;
 
 pub type StaticGradientGeneratorFn = Box<dyn Fn(u32, u32) -> Vec<f32>>;
 
-// GPU compute shader for box blur (WGSL)
-const BOX_BLUR_SHADER_WGSL: &str = include_str!("shaders/box_blur.wgsl");
+// GPU compute shader for decay (WGSL)
+const DECAY_SHADER_WGSL: &str = include_str!("shaders/decay.wgsl");
+// GPU compute shader for deposit (WGSL)
+const DEPOSIT_SHADER_WGSL: &str = include_str!("shaders/deposit.wgsl");
+// GPU compute shader for diffuse (WGSL)
+const DIFFUSE_SHADER_WGSL: &str = include_str!("shaders/diffuse.wgsl");
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct GpuBlurUniforms {
-    width: u32,
-    height: u32,
-    x_radius: u32,
-    y_radius: u32,
+struct DecayUniforms {
+    decay_factor: f32,
 }
 
-async fn box_filter_gpu(
-    image_data: &DMatrix<f32>,
-    width: u32,
-    height: u32,
-    x_radius: u32,
-    y_radius: u32,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) -> DMatrix<f32> {
-    // --- Initialization ---
-    // let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-    //     backends: wgpu::Backends::all(),
-    //     ..Default::default()
-    // });
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuAgent {
+    position: [f32; 2],
+    deposition_amount: f32,
+    _padding: f32, // Ensure 16-byte alignment for SSBO array elements
+}
 
-    // let adapter_opt = instance
-    //     .request_adapter(&wgpu::RequestAdapterOptions {
-    //         power_preference: wgpu::PowerPreference::HighPerformance,
-    //         compatible_surface: None,
-    //         force_fallback_adapter: false,
-    //     })
-    //     .await;
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct DepositUniforms {
+    texture_width: u32,
+    texture_height: u32,
+    num_agents: u32,
+    _padding: u32, // Ensure 16-byte alignment for UBO
+}
 
-    // let adapter = match adapter_opt {
-    //     Some(a) => a,
-    //     None => {
-    //         log::warn!("Failed to find suitable GPU adapter. Falling back to CPU blur.");
-    //         return box_filter(image_data, width, height, x_radius, y_radius);
-    //     }
-    // };
-
-    // let (device, queue) = adapter
-    //     .request_device(
-    //         &wgpu::DeviceDescriptor {
-    //             label: Some("Box Blur Device"),
-    //             required_features: wgpu::Features::empty(),
-    //             required_limits: wgpu::Limits::default(),
-    //         },
-    //         None,
-    //     )
-    //     .await
-    //     .expect("Failed to create GPU device");
-
-    // --- Shader Module ---
-    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Box Blur Shader"),
-        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(BOX_BLUR_SHADER_WGSL)),
-    });
-
-    // --- Data Preparation ---
-    // Flatten DMatrix (column-major) to Vec<f32> (row-major) for GPU
-    let mut flat_input_data: Vec<f32> = Vec::with_capacity((width * height) as usize);
-    for r in 0..image_data.nrows() {
-        for c in 0..image_data.ncols() {
-            flat_input_data.push(image_data[(r, c)]);
-        }
-    }
-
-    let input_buffer_size =
-        (flat_input_data.len() * std::mem::size_of::<f32>()) as wgpu::BufferAddress;
-    let output_buffer_size = input_buffer_size;
-
-    // --- Buffers ---
-    let input_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Input Image Buffer"),
-        contents: bytemuck::cast_slice(&flat_input_data),
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-    });
-
-    let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Output Image Buffer"),
-        size: output_buffer_size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-
-    let uniforms = GpuBlurUniforms {
-        width,
-        height,
-        x_radius,
-        y_radius,
-    };
-    let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Uniform Buffer"),
-        contents: bytemuck::bytes_of(&uniforms),
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-    });
-
-    // --- Bind Group & Pipeline ---
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Box Blur Bind Group Layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                // Input image
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                // Output image
-                binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                // Uniforms
-                binding: 2,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-        ],
-    });
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Box Blur Bind Group"),
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: input_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: output_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: uniform_buffer.as_entire_binding(),
-            },
-        ],
-    });
-
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Box Blur Pipeline Layout"),
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[],
-    });
-
-    let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Box Blur Compute Pipeline"),
-        layout: Some(&pipeline_layout),
-        module: &shader_module,
-        entry_point: "main",
-        compilation_options: wgpu::PipelineCompilationOptions::default(),
-    });
-
-    // --- Command Encoding & Submission ---
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Box Blur Command Encoder"),
-    });
-
-    {
-        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Box Blur Compute Pass"),
-            timestamp_writes: None,
-        });
-        compute_pass.set_pipeline(&compute_pipeline);
-        compute_pass.set_bind_group(0, &bind_group, &[]);
-
-        // Workgroup size is 8x8 (see shader)
-        const WORKGROUP_SIZE_X: u32 = 8;
-        const WORKGROUP_SIZE_Y: u32 = 8;
-        let dispatch_width = (width + WORKGROUP_SIZE_X - 1) / WORKGROUP_SIZE_X;
-        let dispatch_height = (height + WORKGROUP_SIZE_Y - 1) / WORKGROUP_SIZE_Y;
-        compute_pass.dispatch_workgroups(dispatch_width, dispatch_height, 1);
-    }
-
-    // --- Readback ---
-    let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Staging Buffer"),
-        size: output_buffer_size,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    encoder.copy_buffer_to_buffer(&output_buffer, 0, &staging_buffer, 0, output_buffer_size);
-
-    queue.submit(std::iter::once(encoder.finish()));
-
-    // --- Get Data from GPU ---
-    let buffer_slice = staging_buffer.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel(); // Channel for async callback
-    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-        tx.send(result).expect("Failed to send map_async result");
-    });
-    device.poll(wgpu::Maintain::Wait); // Poll device to ensure callback is processed
-
-    rx.recv()
-        .expect("Failed to receive map_async result from channel")
-        .expect("Failed to map staging buffer");
-
-    let data = buffer_slice.get_mapped_range();
-    let result_slice: &[f32] = bytemuck::cast_slice(&data);
-    let result_vec: Vec<f32> = result_slice.to_vec();
-
-    drop(data); // Explicitly drop mapped range before unmap
-    staging_buffer.unmap();
-
-    // Reconstruct DMatrix from row-major Vec<f32>
-    DMatrix::from_row_slice(height as usize, width as usize, &result_vec)
+#[repr(C)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct DiffuseUniforms {
+    texture_width: u32,
+    texture_height: u32,
+    _padding1: u32, // Match WGSL struct padding
+    _padding2: u32,
 }
 
 async fn read_static_gradient_texel(
@@ -351,7 +162,11 @@ async fn read_static_gradient_texel(
 }
 
 pub struct Pheromones {
-    grid: Swapper<DMatrix<f32>>,
+    texture_a: wgpu::Texture,
+    texture_b: wgpu::Texture,
+    texture_a_view: wgpu::TextureView,
+    texture_b_view: wgpu::TextureView,
+    current_texture_is_a: bool,
     static_gradient_texture: Option<wgpu::Texture>,
     enable_static_gradient: bool,
     enable_dynamic_gradient: bool,
@@ -360,6 +175,21 @@ pub struct Pheromones {
     width: u32,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
+
+    // Decay compute pipeline resources
+    decay_pipeline: wgpu::ComputePipeline,
+    decay_bind_group_layout: wgpu::BindGroupLayout,
+
+    // Deposit compute pipeline resources
+    deposit_pipeline: wgpu::ComputePipeline,
+    deposit_bind_group_layout: wgpu::BindGroupLayout,
+
+    // Diffuse compute pipeline resources
+    diffuse_pipeline: wgpu::ComputePipeline,
+    diffuse_bind_group_layout: wgpu::BindGroupLayout,
+
+    // CPU cache for agent reading
+    cpu_read_cache: Vec<f32>,
 }
 
 impl Pheromones {
@@ -372,9 +202,271 @@ impl Pheromones {
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
     ) -> Self {
-        let grid_matrix = DMatrix::zeros(height as usize, width as usize);
         let mut static_gradient_texture_opt = None;
         let mut enable_static_gradient_flag = false;
+
+        let texture_size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+
+        let texture_descriptor = wgpu::TextureDescriptor {
+            label: Some("Pheromone Texture"),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        };
+
+        let texture_a = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Pheromone Texture A"),
+            ..texture_descriptor
+        });
+        let texture_b = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Pheromone Texture B"),
+            ..texture_descriptor
+        });
+
+        let initial_data_size =
+            (width * height * std::mem::size_of::<f32>() as u32) as wgpu::BufferAddress;
+        if initial_data_size > 0 {
+            let initial_data_vec = vec![0.0f32; (width * height) as usize];
+            let initial_data_bytes = bytemuck::cast_slice(&initial_data_vec);
+
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &texture_a,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                initial_data_bytes,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(std::mem::size_of::<f32>() as u32 * width),
+                    rows_per_image: Some(height),
+                },
+                texture_size,
+            );
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &texture_b,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                initial_data_bytes,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(std::mem::size_of::<f32>() as u32 * width),
+                    rows_per_image: Some(height),
+                },
+                texture_size,
+            );
+        }
+
+        let texture_a_view = texture_a.create_view(&wgpu::TextureViewDescriptor::default());
+        let texture_b_view = texture_b.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // --- Decay Compute Pipeline Setup ---
+        let decay_shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Decay Shader Module"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(DECAY_SHADER_WGSL)),
+        });
+
+        let decay_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Decay Bind Group Layout"),
+                entries: &[
+                    // Input Texture (Source)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // Output Texture (Destination)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::R32Float,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    // Uniforms (DecayFactor)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(
+                                std::mem::size_of::<DecayUniforms>() as u64,
+                            ),
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let decay_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Decay Pipeline Layout"),
+                bind_group_layouts: &[&decay_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let decay_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Decay Compute Pipeline"),
+            layout: Some(&decay_pipeline_layout),
+            module: &decay_shader_module,
+            entry_point: "main",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        });
+
+        // --- Deposit Compute Pipeline Setup ---
+        let deposit_shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Deposit Shader Module"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(DEPOSIT_SHADER_WGSL)),
+        });
+
+        let deposit_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Deposit Bind Group Layout"),
+                entries: &[
+                    // Pheromone Texture (output, to be written to)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly, // Agents only write
+                            format: wgpu::TextureFormat::R32Float,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    // Agents Buffer (input)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(
+                                std::mem::size_of::<GpuAgent>() as u64,
+                            ), // Min size of one agent
+                        },
+                        count: None,
+                    },
+                    // Uniforms (sim_params)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                                DepositUniforms,
+                            >()
+                                as u64),
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let deposit_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Deposit Pipeline Layout"),
+                bind_group_layouts: &[&deposit_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let deposit_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Deposit Compute Pipeline"),
+            layout: Some(&deposit_pipeline_layout),
+            module: &deposit_shader_module,
+            entry_point: "main",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        });
+
+        // --- Diffuse Compute Pipeline Setup ---
+        let diffuse_shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Diffuse Shader Module"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(DIFFUSE_SHADER_WGSL)),
+        });
+
+        let diffuse_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Diffuse Bind Group Layout"),
+                entries: &[
+                    // Input Texture (Source)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false }, // Use unfilterable if using textureLoad
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    // Output Texture (Destination)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::R32Float,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    // Uniforms (DiffuseParams)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(std::mem::size_of::<
+                                DiffuseUniforms,
+                            >()
+                                as u64),
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let diffuse_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Diffuse Pipeline Layout"),
+                bind_group_layouts: &[&diffuse_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let diffuse_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Diffuse Compute Pipeline"),
+            layout: Some(&diffuse_pipeline_layout),
+            module: &diffuse_shader_module,
+            entry_point: "main",
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        });
 
         if let Some(generator) = &static_gradient_generator {
             let sg_vec = generator(width, height);
@@ -393,7 +485,7 @@ impl Pheromones {
                     format: wgpu::TextureFormat::R32Float,
                     usage: wgpu::TextureUsages::TEXTURE_BINDING
                         | wgpu::TextureUsages::COPY_DST
-                        | wgpu::TextureUsages::COPY_SRC, // For potential readback
+                        | wgpu::TextureUsages::COPY_SRC,
                     view_formats: &[],
                 });
 
@@ -428,19 +520,46 @@ impl Pheromones {
             height, width
         );
 
-        let grid = Swapper::new(grid_matrix.clone(), grid_matrix);
-
         Self {
             decay_factor,
             enable_static_gradient: enable_static_gradient_flag,
             enable_dynamic_gradient,
-            grid,
+            texture_a,
+            texture_b,
+            texture_a_view,
+            texture_b_view,
+            current_texture_is_a: true,
             static_gradient_texture: static_gradient_texture_opt,
             height,
             width,
             device,
             queue,
+            decay_pipeline,
+            decay_bind_group_layout,
+            deposit_pipeline,
+            deposit_bind_group_layout,
+            diffuse_pipeline,
+            diffuse_bind_group_layout,
+            cpu_read_cache: vec![0.0f32; (width * height) as usize],
         }
+    }
+
+    /// Updates the CPU-side cache (`cpu_read_cache`) with the current GPU pheromone data.
+    /// This should be called after all pheromone GPU operations for a frame are complete.
+    pub fn update_cpu_read_cache(&mut self) {
+        if !self.enable_dynamic_gradient && !self.enable_static_gradient {
+            // If no gradients are enabled, cache can remain zero or empty, effectively.
+            // Or, ensure it's explicitly cleared if necessary.
+            // For now, if it was initialized to zeros and dynamic is off, it means no dynamic pheromones.
+            // If static is also off, then readings should be 0. If static is on, get_reading handles it.
+            // This primarily ensures we don't do a pointless GPU readback if dynamic is off.
+            // However, if static is on and dynamic is off, `read_current_texture_to_vec` would read the (empty) dynamic texture.
+            // The current `read_current_texture_to_vec` reads the dynamic textures (texture_a/b).
+            // If dynamic_gradient is off, these textures aren't updated by deposit/diffuse/decay.
+            // So, if only static is enabled, this cache will reflect empty dynamic values, which is correct.
+            return; // Avoid GPU readback if dynamic pheromones are not being updated.
+        }
+        self.cpu_read_cache = self.read_current_texture_to_vec();
     }
 
     pub fn get_reading(&self, at_location: Point2) -> Option<i32> {
@@ -449,14 +568,32 @@ impl Pheromones {
             x_f >= 0.0 && x_f < self.width as f32 && y_f >= 0.0 && y_f < self.height as f32;
 
         if is_within_bounds {
-            let (x_u32, y_u32) = (x_f as u32, y_f as u32);
-            let row = y_u32 as usize;
-            let col = x_u32 as usize;
+            let x_u32 = x_f as u32;
+            let y_u32 = y_f as u32;
+
+            // Calculate 1D index for the row-major cpu_read_cache
+            let index = (y_u32 * self.width + x_u32) as usize;
+            let mut dynamic_pheromone_value = 0.0f32;
+
+            if self.enable_dynamic_gradient {
+                if index < self.cpu_read_cache.len() {
+                    dynamic_pheromone_value = self.cpu_read_cache[index];
+                } else {
+                    // This case should ideally not happen if coordinates are within bounds
+                    // and cache is sized correctly.
+                    log::warn!(
+                        "Index out of bounds for cpu_read_cache. Index: {}, Cache size: {}. Coords: ({}, {})",
+                        index,
+                        self.cpu_read_cache.len(),
+                        x_u32,
+                        y_u32
+                    );
+                }
+            }
 
             match (self.enable_dynamic_gradient, self.enable_static_gradient) {
                 (true, true) => {
-                    // Dynamic and Static
-                    let pheromone_value = self.grid.a()[(row, col)];
+                    let pheromone_value = dynamic_pheromone_value;
                     let static_value_f32_opt: Option<f32> =
                         if let Some(tex) = &self.static_gradient_texture {
                             pollster::block_on(read_static_gradient_texel(
@@ -467,18 +604,14 @@ impl Pheromones {
                                 y_u32,
                             ))
                         } else {
-                            // This case should ideally not happen if enable_static_gradient is true
-                            // but the texture failed to initialize. Log if it does.
                             log::warn!("Static gradient enabled but no texture found for reading.");
                             None
                         };
-                    // Default to 0.0 if texture read fails or no texture present
                     let static_value = static_value_f32_opt.unwrap_or(0.0);
                     Some(((static_value + pheromone_value) * 255.0).round() as i32)
                 }
-                (true, false) => Some((self.grid.a()[(row, col)] * 255.0).round() as i32),
+                (true, false) => Some((dynamic_pheromone_value * 255.0).round() as i32),
                 (false, true) => {
-                    // Static only
                     let static_value_f32_opt: Option<f32> =
                         if let Some(tex) = &self.static_gradient_texture {
                             pollster::block_on(read_static_gradient_texel(
@@ -492,7 +625,6 @@ impl Pheromones {
                             log::warn!("Static gradient enabled but no texture found for reading.");
                             None
                         };
-                    // Default to an intensity of 0 if texture read fails or no texture
                     static_value_f32_opt
                         .map(|sv| (sv * 255.0).round() as i32)
                         .or(Some(0))
@@ -509,74 +641,283 @@ impl Pheromones {
     }
 
     pub fn deposit(&mut self, agents: &[Agent]) {
-        if !self.enable_dynamic_gradient {
+        if !self.enable_dynamic_gradient || agents.is_empty() {
+            // If not dynamic or no agents, this operation effectively does nothing to agent depositions.
+            // However, to maintain the ping-pong texture flow for subsequent diffuse/decay,
+            // we still need to ensure the "next" texture has the data from the "current" one
+            // and then swap them.
+            let (current_texture, _current_view) = self.get_current_active_texture();
+            let (next_texture, _next_view) = self.get_next_texture_and_view();
+
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Deposit No-Op Copy Encoder"),
+                });
+
+            encoder.copy_texture_to_texture(
+                current_texture.as_image_copy(),
+                next_texture.as_image_copy(),
+                wgpu::Extent3d {
+                    width: self.width,
+                    height: self.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.queue.submit(std::iter::once(encoder.finish()));
+            self.current_texture_is_a = !self.current_texture_is_a; // Swap current and next
             return;
         }
 
-        let (current_pheromones_data, next_pheromones_data) = self.grid.read_a_write_b();
+        let (current_texture, _current_view) = self.get_current_active_texture();
+        let (_next_texture, next_view) = self.get_next_texture_and_view(); // Shader writes to next_view
 
-        *next_pheromones_data = current_pheromones_data.clone();
+        // Prepare agent data for GPU
+        let gpu_agents: Vec<GpuAgent> = agents
+            .iter()
+            .map(|agent| GpuAgent {
+                position: [agent.location().x, agent.location().y],
+                deposition_amount: agent.deposition_amount(),
+                _padding: 0.0, // Padding for 16-byte alignment
+            })
+            .collect();
 
-        for agent in agents {
-            let location_to_deposit: Point2 = agent.location();
-            let x_f32 = location_to_deposit.x;
-            let y_f32 = location_to_deposit.y;
+        let agent_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Agent Buffer (Deposit)"),
+                contents: bytemuck::cast_slice(&gpu_agents),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            });
 
-            // Wrap coordinates
-            let x_wrapped = (x_f32 % self.width as f32 + self.width as f32) % self.width as f32;
-            let y_wrapped = (y_f32 % self.height as f32 + self.height as f32) % self.height as f32;
+        let uniforms = DepositUniforms {
+            texture_width: self.width,
+            texture_height: self.height,
+            num_agents: agents.len() as u32,
+            _padding: 0, // Padding for UBO
+        };
+        let uniform_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Deposit Uniform Buffer"),
+                contents: bytemuck::bytes_of(&uniforms),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
 
-            let x = x_wrapped as u32;
-            let y = y_wrapped as u32;
-            let row = y as usize;
-            let col = x as usize;
+        let deposit_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Deposit Bind Group"),
+            layout: &self.deposit_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(next_view), // Shader writes to the 'next' texture view
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: agent_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
 
-            if row < next_pheromones_data.nrows() && col < next_pheromones_data.ncols() {
-                next_pheromones_data[(row, col)] = agent.deposition_amount();
-            } else {
-                trace!(
-                    "Calculated index ({}, {}) out of bounds for DMatrix with shape ({}, {}) during deposition",
-                    row,
-                    col,
-                    next_pheromones_data.nrows(),
-                    next_pheromones_data.ncols()
-                );
-            }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Deposit Command Encoder"),
+            });
+
+        // Step 1: Copy current texture to next texture (so deposit shader starts with previous state)
+        encoder.copy_texture_to_texture(
+            current_texture.as_image_copy(),
+            self.get_next_texture_and_view().0.as_image_copy(), // ensure it's the texture, not view
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        // Step 2: Run deposit compute shader
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Deposit Compute Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&self.deposit_pipeline);
+            compute_pass.set_bind_group(0, &deposit_bind_group, &[]);
+
+            // Dispatch based on number of agents. Workgroup size X is 64 in shader.
+            let dispatch_x = (agents.len() as u32 + 63) / 64;
+            compute_pass.dispatch_workgroups(dispatch_x, 1, 1);
         }
-        self.grid.swap();
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Swap textures: the 'next' texture (which was written to) becomes the 'current'
+        self.current_texture_is_a = !self.current_texture_is_a;
     }
 
     pub fn diffuse(&mut self) {
         if !self.enable_dynamic_gradient {
+            // If not dynamic, diffuse does nothing. To maintain texture flow, copy current to next & swap.
+            let (current_texture, _current_view) = self.get_current_active_texture();
+            let (next_texture, _next_view) = self.get_next_texture_and_view();
+
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Diffuse No-Op Copy Encoder"),
+                });
+            encoder.copy_texture_to_texture(
+                current_texture.as_image_copy(),
+                next_texture.as_image_copy(),
+                wgpu::Extent3d {
+                    width: self.width,
+                    height: self.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.queue.submit(std::iter::once(encoder.finish()));
+            self.current_texture_is_a = !self.current_texture_is_a; // Swap current and next
             return;
         }
-        let (grid_a_data, grid_b_data) = self.grid.read_a_write_b();
+        // log::warn!("Pheromones::diffuse() called but not yet fully implemented for textures beyond copy.");
 
-        let filtered_matrix = pollster::block_on(box_filter_gpu(
-            grid_a_data,
-            self.width,
-            self.height,
-            1, // x_radius
-            1, // y_radius
-            &self.device,
-            &self.queue,
-        ));
-        *grid_b_data = filtered_matrix;
+        let (source_view, dest_view) = if self.current_texture_is_a {
+            (&self.texture_a_view, &self.texture_b_view)
+        } else {
+            (&self.texture_b_view, &self.texture_a_view)
+        };
 
-        self.grid.swap()
+        let uniforms = DiffuseUniforms {
+            texture_width: self.width,
+            texture_height: self.height,
+            _padding1: 0,
+            _padding2: 0,
+        };
+        let uniform_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Diffuse Uniform Buffer"),
+                contents: bytemuck::bytes_of(&uniforms),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+
+        let diffuse_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Diffuse Bind Group"),
+            layout: &self.diffuse_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(dest_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Diffuse Command Encoder"),
+            });
+
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Diffuse Compute Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&self.diffuse_pipeline);
+            compute_pass.set_bind_group(0, &diffuse_bind_group, &[]);
+
+            // Dispatch based on texture dimensions and workgroup size (8x8)
+            let dispatch_width = (self.width + 7) / 8;
+            let dispatch_height = (self.height + 7) / 8;
+            compute_pass.dispatch_workgroups(dispatch_width, dispatch_height, 1);
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Swap textures for next operation
+        self.current_texture_is_a = !self.current_texture_is_a;
     }
 
     pub fn decay(&mut self) {
         if !self.enable_dynamic_gradient {
             return;
         }
+        // log::warn!("Pheromones::decay() called but not yet implemented for textures.");
+        // self.current_texture_is_a = !self.current_texture_is_a; // Old placeholder
 
-        let (current_pheromones_data, next_pheromones_data) = self.grid.read_a_write_b();
-        let decay_factor = self.decay_factor;
+        let (source_view, dest_view) = if self.current_texture_is_a {
+            (&self.texture_a_view, &self.texture_b_view)
+        } else {
+            (&self.texture_b_view, &self.texture_a_view)
+        };
 
-        *next_pheromones_data = current_pheromones_data * (1.0 - decay_factor);
+        let uniforms = DecayUniforms {
+            decay_factor: self.decay_factor,
+        };
+        let uniform_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Decay Uniform Buffer"),
+                contents: bytemuck::bytes_of(&uniforms),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, // COPY_DST if we update it often
+            });
 
-        self.grid.swap();
+        let decay_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Decay Bind Group"),
+            layout: &self.decay_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(dest_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Decay Command Encoder"),
+            });
+
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Decay Compute Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&self.decay_pipeline);
+            compute_pass.set_bind_group(0, &decay_bind_group, &[]);
+
+            // Dispatch based on texture dimensions and workgroup size (8x8)
+            let dispatch_width = (self.width + 7) / 8; // Equivalent to ceil(width / 8.0)
+            let dispatch_height = (self.height + 7) / 8; // Equivalent to ceil(height / 8.0)
+            compute_pass.dispatch_workgroups(dispatch_width, dispatch_height, 1);
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Swap textures for next frame
+        self.current_texture_is_a = !self.current_texture_is_a;
     }
 
     pub fn set_decay_factor(&mut self, decay_factor: f32) {
@@ -584,7 +925,10 @@ impl Pheromones {
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &f32> {
-        self.grid.a().iter()
+        log::warn!(
+            "Pheromones::iter() called but not yet implemented for textures. Returning empty iterator."
+        );
+        std::iter::empty()
     }
 
     pub fn enable_dynamic_gradient(&mut self) {
@@ -596,7 +940,117 @@ impl Pheromones {
     }
 
     pub fn get_current_grid(&self) -> &DMatrix<f32> {
-        self.grid.a()
+        // self.grid.a() // Old DMatrix access
+        // This is a major breaking change. World::draw expects &DMatrix<f32>.
+        // We'll need to return something else, or have World::draw adapt.
+        panic!(
+            "Pheromones::get_current_grid() is not compatible with wgpu::Texture. It needs to be redesigned to provide texture data for drawing."
+        );
+        // The function signature itself (returning &DMatrix) is now incorrect.
+        // This will need to change to return perhaps a Vec<f32> or Vec<u8> after reading from texture,
+        // or World::draw will need to take &Pheromones and handle texture reading itself.
+    }
+
+    fn get_current_active_texture(&self) -> (&wgpu::Texture, &wgpu::TextureView) {
+        if self.current_texture_is_a {
+            (&self.texture_a, &self.texture_a_view)
+        } else {
+            (&self.texture_b, &self.texture_b_view)
+        }
+    }
+
+    #[allow(dead_code)] // To be used by compute shaders later
+    fn get_next_texture_and_view(&self) -> (&wgpu::Texture, &wgpu::TextureView) {
+        if self.current_texture_is_a {
+            // Current is A, next is B
+            (&self.texture_b, &self.texture_b_view)
+        } else {
+            // Current is B, next is A
+            (&self.texture_a, &self.texture_a_view)
+        }
+    }
+
+    /// Reads the currently active pheromone texture data into a `Vec<f32>`.
+    /// This is a synchronous operation that will block until the GPU readback is complete.
+    /// The returned Vec contains the texture data in row-major order.
+    pub fn read_current_texture_to_vec(&self) -> Vec<f32> {
+        let (current_texture, _view) = self.get_current_active_texture();
+
+        let texture_format = current_texture.format();
+        let bytes_per_pixel = texture_format
+            .block_copy_size(Some(wgpu::TextureAspect::All))
+            .unwrap_or_else(|| {
+                panic!(
+                    "Could not determine block_copy_size for texture format {:?}",
+                    texture_format
+                )
+            });
+
+        if bytes_per_pixel == 0 {
+            panic!(
+                "Texture format {:?} has a block_copy_size of 0.",
+                texture_format
+            );
+        }
+
+        let buffer_size = self.width as u64 * self.height as u64 * bytes_per_pixel as u64;
+
+        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Pheromone Readback Staging Buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Pheromone Readback Encoder"),
+            });
+
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: current_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &staging_buffer,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_pixel * self.width),
+                    rows_per_image: Some(self.height),
+                },
+            },
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        let buffer_slice = staging_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            tx.send(result).expect("Failed to send map_async result");
+        });
+        self.device.poll(wgpu::Maintain::Wait); // Block until operation is complete
+
+        rx.recv()
+            .expect("Failed to receive map_async result from channel")
+            .expect("Failed to map staging buffer");
+
+        let data = buffer_slice.get_mapped_range();
+        let result_slice: &[f32] = bytemuck::cast_slice(&data);
+        let result_vec: Vec<f32> = result_slice.to_vec();
+
+        drop(data);
+        staging_buffer.unmap();
+
+        result_vec
     }
 }
 

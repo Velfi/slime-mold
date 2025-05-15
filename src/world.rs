@@ -14,8 +14,6 @@ pub struct World {
     agents: Vec<Agent>,
     frame_time: f32,
     pheromones: Arc<RwLock<Pheromones>>,
-    /// A toggle for rendering in color vs. black & white mode. Color mode has an FPS cost so we render in B&W by default
-    black_and_white_mode: bool,
     settings: Settings,
     boundary_rect: Rect<u32>,
     device: Arc<wgpu::Device>,
@@ -70,7 +68,6 @@ ENABLE_DYN_GRAD	{:?}
             boundary_rect,
             frame_time: 0.0,
             pheromones,
-            black_and_white_mode: true,
             settings,
             device,
             queue,
@@ -140,10 +137,6 @@ ENABLE_DYN_GRAD	{:?}
         self.frame_time = frame_time;
     }
 
-    pub fn toggle_black_and_white_mode(&mut self) {
-        self.black_and_white_mode = !self.black_and_white_mode
-    }
-
     pub fn toggle_dynamic_gradient(&mut self) {
         self.settings.pheromone_enable_dynamic_gradient =
             !self.settings.pheromone_enable_dynamic_gradient;
@@ -189,36 +182,43 @@ ENABLE_DYN_GRAD	{:?}
     /// Update the `World` internal state; bounce the box around the screen.
     pub fn update(&mut self) {
         let boundary_rect = &self.boundary_rect;
-        let pheromones = &self.pheromones;
+        let pheromones_read_lock = &self.pheromones;
         let agents = &mut self.agents;
-        // More stuff should be affected by delta_t in order to make the simulation run at the same speed
-        // regardless of how fast the program is actually running. Right now it just affects agent speed.
         let delta_t = self.frame_time;
 
+        // Agents sense the environment (using CPU cache of pheromones from end of *previous* frame)
+        // and decide on their next action.
         agents.par_iter_mut().for_each(|agent| {
-            let pheromones = pheromones
+            let pheromones_guard = pheromones_read_lock
                 .read()
                 .expect("reading pheromones during agent update");
-
-            agent.update(&pheromones, delta_t, boundary_rect)
+            // Agent::update now uses pheromones_guard.get_reading(), which reads from CPU cache
+            agent.update(&pheromones_guard, delta_t, boundary_rect)
         });
 
-        let pheromones = &mut self.pheromones;
-        let agents = &self.agents;
+        // Now, update the pheromone maps based on agent actions from this frame
+        // and other pheromone dynamics (diffuse, decay).
+        // These operations work on the GPU textures.
+        let mut pheromones_write_guard = self
+            .pheromones
+            .write()
+            .expect("couldn't get write lock on pheromones for update steps");
 
-        pheromones
-            .write()
-            .expect("couldn't get mut ref to pheromones for deposit step")
-            .deposit(agents);
-        pheromones
-            .write()
-            .expect("couldn't get mut ref to pheromones for diffuse step")
-            .diffuse();
-        pheromones
-            .write()
-            .expect("couldn't get mut ref to pheromones for decay step")
-            .decay();
+        // Deposit step (GPU)
+        pheromones_write_guard.deposit(agents); // Pass current state of agents for deposition
 
+        // Diffuse step (currently GPU placeholder - copies texture)
+        pheromones_write_guard.diffuse();
+
+        // Decay step (GPU)
+        pheromones_write_guard.decay();
+
+        // CRITICAL: After all GPU pheromone operations for the current frame are done,
+        // update the CPU read cache with the latest pheromone state.
+        // This cache will be used by agents in the *next* frame's sensing phase.
+        pheromones_write_guard.update_cpu_read_cache();
+
+        // Agent population control (remains the same)
         if self.agents.len() > self.settings.agent_count_maximum {
             self.agents.truncate(self.settings.agent_count_maximum)
         }
@@ -240,20 +240,27 @@ ENABLE_DYN_GRAD	{:?}
             .read()
             .expect("couldn't get lock on pheromones for draw");
 
-        // Access the underlying DMatrix
-        // The Pheromones::iter() method used self.grid.a().iter(), which is column-major.
-        // We need to iterate self.grid.a() in row-major order.
-        let matrix = pheromones_guard.get_current_grid(); // This is &DMatrix<f32>
+        // Read pheromone data from texture into a row-major Vec<f32>
+        let pheromones_row_major = pheromones_guard.read_current_texture_to_vec();
 
-        // Uncomment to enable rendering of the static gradient for debugging
-        // let matrix = pheromones_guard.static_gradient().expect("Static gradient not available for drawing");
+        // The old DMatrix access and manual row-major conversion is no longer needed:
+        // let matrix = pheromones_guard.get_current_grid();
+        // let mut pheromones_row_major: Vec<f32> = Vec::with_capacity(num_rows * num_cols);
+        // for r in 0..num_rows {
+        //     for c in 0..num_cols {
+        //         pheromones_row_major.push(matrix[(r, c)]);
+        //     }
+        // }
 
-        let mut pheromones_row_major: Vec<f32> = Vec::with_capacity(num_rows * num_cols);
-
-        for r in 0..num_rows {
-            for c in 0..num_cols {
-                pheromones_row_major.push(matrix[(r, c)]);
-            }
+        // Ensure the received vector has the expected size
+        if pheromones_row_major.len() != num_rows * num_cols {
+            error!(
+                "Pheromone data size mismatch. Expected {}, got {}. Returning empty frame.",
+                num_rows * num_cols,
+                pheromones_row_major.len()
+            );
+            // Return a black frame or handle error appropriately
+            return vec![0u8; num_rows * num_cols * 4];
         }
 
         pixel_iter

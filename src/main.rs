@@ -276,9 +276,6 @@ async fn run(event_loop: EventLoop<()>, window: Arc<Window>, initial_settings: S
                 elwt.exit();
                 return; // Exit event processing for this iteration
             }
-            if input.key_pressed(KeyCode::KeyB) {
-                world.toggle_black_and_white_mode();
-            }
             if input.key_pressed(KeyCode::KeyD) {
                 world.toggle_dynamic_gradient();
             }
