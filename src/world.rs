@@ -6,7 +6,6 @@ use crate::{
     rect::Rect,
     settings::Settings,
 };
-use colorgrad::preset::viridis;
 use log::{error, info};
 use rayon::prelude::*;
 use std::sync::{Arc, RwLock};
@@ -14,7 +13,6 @@ use std::sync::{Arc, RwLock};
 pub struct World {
     agents: Vec<Agent>,
     frame_time: f32,
-    gradient: Arc<Box<dyn colorgrad::Gradient + Sync + Send>>,
     pheromones: Arc<RwLock<Pheromones>>,
     /// A toggle for rendering in color vs. black & white mode. Color mode has an FPS cost so we render in B&W by default
     black_and_white_mode: bool,
@@ -65,15 +63,12 @@ ENABLE_DYN_GRAD	{:?}
             Arc::clone(&queue),
         )));
 
-        let gradient = Arc::new(Box::new(viridis()) as Box<dyn colorgrad::Gradient + Sync + Send>);
-
         let boundary_rect = Rect::new(0, 0, settings.window_width, settings.window_height);
 
         Self {
             agents,
             boundary_rect,
             frame_time: 0.0,
-            gradient,
             pheromones,
             black_and_white_mode: true,
             settings,
@@ -215,7 +210,6 @@ ENABLE_DYN_GRAD	{:?}
             .write()
             .expect("couldn't get mut ref to pheromones for deposit step")
             .deposit(agents);
-
         pheromones
             .write()
             .expect("couldn't get mut ref to pheromones for diffuse step")
@@ -240,7 +234,6 @@ ENABLE_DYN_GRAD	{:?}
         let mut frame_data = vec![0u8; num_rows * num_cols * 4]; // RGBA8
 
         let pixel_iter = frame_data.par_chunks_exact_mut(4);
-        let gradient = Arc::clone(&self.gradient);
 
         let pheromones_guard = self
             .pheromones
@@ -268,19 +261,12 @@ ENABLE_DYN_GRAD	{:?}
             .for_each(|(pixel, pheromone_value)| {
                 // clamp to renderable range
                 // map cell pheromone values to rgba pixels
-                if self.black_and_white_mode {
-                    // Ensure all operations are on f32 before final cast
-                    let val_f32: f32 = *pheromone_value * 255.0f32;
-                    let rounded_f32: f32 = val_f32.round();
-                    let clamped_f32: f32 = rounded_f32.clamp(0.0f32, 255.0f32);
-                    let val_u8: u8 = clamped_f32 as u8;
-                    pixel.copy_from_slice(&[val_u8, val_u8, val_u8, 0xff]);
-                } else {
-                    // Ensure pheromone_value is dereferenced and clamped as f32 before casting to f64
-                    let clamped_pheromone = (*pheromone_value).clamp(0.0f32, 1.0f32);
-                    let rgba = gradient.at(clamped_pheromone).to_rgba8(); // colorgrad::Gradient::at expects f64
-                    pixel.copy_from_slice(&rgba);
-                }
+                // Ensure all operations are on f32 before final cast
+                let val_f32: f32 = *pheromone_value * 255.0f32;
+                let rounded_f32: f32 = val_f32.round();
+                let clamped_f32: f32 = rounded_f32.clamp(0.0f32, 255.0f32);
+                let val_u8: u8 = clamped_f32 as u8;
+                pixel.copy_from_slice(&[val_u8, val_u8, val_u8, 0xff]);
             });
 
         frame_data
