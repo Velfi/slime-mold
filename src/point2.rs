@@ -1,5 +1,7 @@
-#[derive(Clone, Copy, Debug)]
-#[derive(Default)]
+use bytemuck::{Pod, Zeroable};
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct Point2 {
     pub x: f32,
     pub y: f32,
@@ -56,4 +58,3 @@ impl Point2 {
         self.y += y;
     }
 }
-

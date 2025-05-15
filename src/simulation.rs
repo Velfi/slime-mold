@@ -1,6 +1,7 @@
 use crate::errors::SlimeError;
 use crate::settings::DEFAULT_SETTINGS_FILE;
 use crate::{point2::Point2, rect::Rect, settings::Settings};
+use bytemuck::{Pod, Zeroable};
 use log::debug;
 use log::error;
 use log::info;
@@ -20,7 +21,8 @@ use wgpu::util::DeviceExt;
 
 pub type SensorReading = (f32, f32, f32);
 
-#[derive(TypedBuilder, Clone)]
+#[repr(C)]
+#[derive(TypedBuilder, Clone, Copy, Pod, Zeroable)]
 pub struct Agent {
     pub location: Point2,
     // The heading an agent is facing. (In degrees)
@@ -41,8 +43,6 @@ pub struct Agent {
     // The tendency of agents to move erratically
     #[builder(default = 0.0f32)]
     pub jitter: f32,
-    #[builder(default = default_rng())]
-    pub rng: StdRng,
     pub deposition_amount: f32,
 }
 
@@ -76,7 +76,6 @@ impl Agent {
             .jitter(settings.agent_jitter)
             .deposition_amount(deposition_amount)
             .rotation_speed(settings.agent_turn_speed)
-            .rng(StdRng::from_os_rng())
             .build()
     }
 
@@ -101,7 +100,7 @@ impl Agent {
             0.0
         } else if c_reading < l_reading && c_reading < r_reading {
             // rotate randomly to the left or right
-            let should_rotate_right: bool = self.rng.random();
+            let should_rotate_right: bool = rand::rng().random();
 
             if should_rotate_right {
                 trace!("Agent is rotating randomly to the right");
@@ -133,7 +132,7 @@ impl Agent {
     }
 
     pub fn set_new_random_move_speed_in_range(&mut self, move_speed_range: Range<f32>) {
-        self.move_speed = self.rng.random_range(move_speed_range);
+        self.move_speed = rand::rng().random_range(move_speed_range);
         trace!("set agent's speed to {}", self.move_speed);
     }
 
@@ -174,10 +173,10 @@ impl Agent {
 
     pub fn rotate(&mut self, mut rotation_in_degrees: f32) {
         if self.jitter != 0.0 {
-            let magnitude = if self.rng.random() {
-                self.rng.random::<f32>()
+            let magnitude = if rand::rng().random() {
+                rand::rng().random::<f32>()
             } else {
-                self.rng.random::<f32>() * -1.0
+                rand::rng().random::<f32>() * -1.0
             };
             // Randomly adjust rotation amount
             rotation_in_degrees += self.jitter * magnitude;
@@ -325,10 +324,6 @@ pub fn move_relative_clamping(xy: &mut Point2, x: f32, y: f32, boundary_rect: &R
     } else if xy.y < boundary_rect.y_min() as f32 {
         xy.y = boundary_rect.y_min() as f32;
     }
-}
-
-fn default_rng() -> StdRng {
-    StdRng::from_os_rng()
 }
 
 #[cfg(test)]
