@@ -48,10 +48,10 @@ where
 
 impl Rect<f32> {
     pub fn contains(&self, other: &Point2) -> bool {
-        other.x >= self.x_min().into()
-            && other.x < self.x_max().into()
-            && other.y >= self.y_min().into()
-            && other.y < self.y_max().into()
+        other.x >= self.x_min()
+            && other.x < self.x_max()
+            && other.y >= self.y_min()
+            && other.y < self.y_max()
     }
 }
 

@@ -1,19 +1,14 @@
 #![allow(dead_code)]
 
 use crate::{Agent, Point2, Swapper};
-use image::{GrayImage, ImageReader};
-use imageproc::filter::*;
 use log::{debug, trace};
-use std::path::Path;
 
 pub struct Pheromones {
-    grid: Swapper<GrayImage>,
-    static_gradient: Option<GrayImage>,
+    grid: Swapper<Vec<u8>>,
+    static_gradient: Option<Vec<u8>>,
     enable_static_gradient: bool,
     enable_dynamic_gradient: bool,
     decay_factor: f32,
-    _deposit_size: f32,
-    _diffuse_size: f32,
     height: u32,
     width: u32,
 }
@@ -24,9 +19,9 @@ impl Pheromones {
         height: u32,
         decay_factor: f32,
         enable_dynamic_gradient: bool,
-        static_gradient_generator: Option<Box<dyn Fn(u32, u32) -> GrayImage>>,
+        static_gradient_generator: Option<Box<dyn Fn(u32, u32) -> Vec<u8>>>, // Changed return type
     ) -> Self {
-        let grid = GrayImage::new(width, height);
+        let grid_data = vec![0u8; (width * height) as usize]; // Initialize Vec<u8>
         let mut static_gradient = None;
         let mut enable_static_gradient = false;
 
@@ -37,15 +32,12 @@ impl Pheromones {
 
         debug!(
             "Created new grid with width {} and height {}",
-            grid.width(),
-            grid.height()
+            width, height
         );
 
-        let grid = Swapper::new(grid.clone(), grid);
+        let grid = Swapper::new(grid_data.clone(), grid_data);
 
         Self {
-            _deposit_size: 1.0,
-            _diffuse_size: 3.0,
             decay_factor,
             enable_static_gradient,
             enable_dynamic_gradient,
@@ -56,7 +48,8 @@ impl Pheromones {
         }
     }
 
-    pub fn static_gradient(&self) -> Option<&GrayImage> {
+    pub fn static_gradient(&self) -> Option<&Vec<u8>> {
+        // Changed return type
         self.static_gradient.as_ref()
     }
 
@@ -67,23 +60,24 @@ impl Pheromones {
             x >= 0.0 && x < self.width as f32 && y >= 0.0 && y < self.height as f32;
 
         if is_within_bounds {
-            let (x, y) = (x as u32, y as u32);
+            let (x_u32, y_u32) = (x as u32, y as u32);
+            let index = (y_u32 * self.width + x_u32) as usize;
 
             match (self.enable_dynamic_gradient, self.enable_static_gradient) {
                 (true, true) => {
-                    let pheromone_value = self.grid.a().get_pixel(x, y);
+                    let pheromone_value = self.grid.a()[index];
                     let static_value = self
                         .static_gradient
                         .as_ref()
-                        .map(|grid| grid.get_pixel(x, y));
+                        .map(|grid_data| grid_data[index]);
 
-                    static_value.map(|sv| (sv.0[0] + pheromone_value.0[0]) as i32)
+                    static_value.map(|sv| (sv + pheromone_value) as i32)
                 }
-                (true, false) => Some(self.grid.a().get_pixel(x, y).0[0] as i32),
+                (true, false) => Some(self.grid.a()[index] as i32),
                 (false, true) => self
                     .static_gradient
                     .as_ref()
-                    .map(|grid| grid.get_pixel(x, y).0[0] as i32),
+                    .map(|grid_data| grid_data[index] as i32),
                 (false, false) => Some(0),
             }
         } else {
@@ -92,7 +86,7 @@ impl Pheromones {
     }
 
     pub fn len(&self) -> u32 {
-        self.grid.a().width() * self.grid.a().height()
+        self.width * self.height
     }
 
     pub fn deposit(&mut self, agents: &[Agent]) {
@@ -102,25 +96,27 @@ impl Pheromones {
     }
 
     fn deposit_individual_agent(&mut self, agent: &Agent) {
-        let location_to_deposit: Point2 = agent.location().into();
+        let location_to_deposit: Point2 = agent.location();
+        let x_f32 = location_to_deposit.x;
+        let y_f32 = location_to_deposit.y;
+
         let is_within_bounds =
-            location_to_deposit.x < self.width as f32 && location_to_deposit.y < self.height as f32;
+            x_f32 >= 0.0 && x_f32 < self.width as f32 && y_f32 >= 0.0 && y_f32 < self.height as f32;
 
         if is_within_bounds {
-            let grid_ref = self
-                .grid
-                .mut_a()
-                .get_pixel_mut(location_to_deposit.x as u32, location_to_deposit.y as u32);
+            let x = x_f32 as u32;
+            let y = y_f32 as u32;
+            let index = (y * self.width + x) as usize;
 
-            *grid_ref = [(agent.deposition_amount() * 255.0).round() as u8].into();
+            self.grid.mut_a()[index] = (agent.deposition_amount() * 255.0).round() as u8;
         } else {
             trace!("agent out of bounds at ({})", location_to_deposit)
         }
     }
 
     pub fn diffuse(&mut self) {
-        let (grid_a, grid_b) = self.grid.read_a_write_b();
-        *grid_b = box_filter(grid_a, 1, 1);
+        let (grid_a_data, grid_b_data) = self.grid.read_a_write_b();
+        *grid_b_data = box_filter(grid_a_data, self.width, self.height, 1, 1); // Pass dimensions
         self.grid.swap()
     }
 
@@ -148,25 +144,56 @@ impl Pheromones {
     }
 }
 
+fn box_filter(image_data: &[u8], width: u32, height: u32, x_radius: u32, y_radius: u32) -> Vec<u8> {
+    let mut out_data = vec![0u8; (width * height) as usize];
+
+    let kernel_width = 2 * x_radius + 1;
+    let kernel_height = 2 * y_radius + 1;
+    let kernel_size = (kernel_width * kernel_height) as f32;
+
+    for y_out in 0..height {
+        for x_out in 0..width {
+            let mut sum = 0.0;
+            for ky in 0..kernel_height {
+                for kx in 0..kernel_width {
+                    let x_in = (x_out as i32 + kx as i32 - x_radius as i32)
+                        .max(0)
+                        .min(width as i32 - 1) as u32;
+                    let y_in = (y_out as i32 + ky as i32 - y_radius as i32)
+                        .max(0)
+                        .min(height as i32 - 1) as u32;
+
+                    let index_in = (y_in * width + x_in) as usize;
+                    sum += image_data[index_in] as f32;
+                }
+            }
+            let avg = (sum / kernel_size).round() as u8;
+            let index_out = (y_out * width + x_out) as usize;
+            out_data[index_out] = avg;
+        }
+    }
+    out_data
+}
+
 pub trait StaticGradientGenerator {
-    fn generate(width: u32, height: u32) -> GrayImage;
+    fn generate(width: u32, height: u32) -> Vec<u8>;
 }
 
 // TODO only works if height == width
-pub fn generate_circular_static_gradient(width: u32, height: u32) -> GrayImage {
+pub fn generate_circular_static_gradient(width: u32, height: u32) -> Vec<u8> {
     let min_value: f32 = 0.0;
     let max_value: f32 = 255.0;
     let root_2 = 2.0f32.sqrt();
 
     let vec: Vec<_> = (0..width)
-        .flat_map(|x| (0..height).map(move |y| (x as f32, y as f32)))
-        .map(|(x, y)| {
-            let width = width as f32;
-            let height = height as f32;
+        .flat_map(|x_coord| (0..height).map(move |y_coord| (x_coord as f32, y_coord as f32)))
+        .map(|(x_f, y_f)| {
+            let w_f = width as f32;
+            let h_f = height as f32;
             let mut distance_to_center =
-                ((x - width / 2.0).powi(2) + (y - height / 2.0).powi(2)).sqrt();
+                ((x_f - w_f / 2.0).powi(2) + (y_f - h_f / 2.0).powi(2)).sqrt();
 
-            distance_to_center /= root_2 * width / 2.0;
+            distance_to_center /= root_2 * w_f / 2.0;
 
             let t = min_value * distance_to_center + max_value * (1.0 - distance_to_center);
 
@@ -181,11 +208,11 @@ pub fn generate_circular_static_gradient(width: u32, height: u32) -> GrayImage {
         width * height
     );
 
-    GrayImage::from_raw(width, height, vec).unwrap()
+    vec
 }
 
 // TODO replace custom gradient generation with raqote?
-pub fn generate_linear_static_gradient(width: u32, height: u32) -> GrayImage {
+pub fn generate_linear_static_gradient(width: u32, height: u32) -> Vec<u8> {
     let min_value: f32 = 0.0;
     let max_value: f32 = 255.0;
     let a: f32 = -0.6;
@@ -193,12 +220,12 @@ pub fn generate_linear_static_gradient(width: u32, height: u32) -> GrayImage {
     let c: f32 = width as f32 - (width as f32 / 4.0);
 
     let vec: Vec<_> = (0..width)
-        .flat_map(|x| (0..height).map(move |y| (x as f32, y as f32)))
-        .map(|(x, y)| {
-            let width = width as f32;
+        .flat_map(|x_coord| (0..height).map(move |y_coord| (x_coord as f32, y_coord as f32)))
+        .map(|(x_f, y_f)| {
+            let w_f = width as f32;
 
-            let distance = (a * x + b * y + c) / (a * a + b * b).sqrt();
-            let color_coef = distance.abs() / width;
+            let distance = (a * x_f + b * y_f + c) / (a * a + b * b).sqrt();
+            let color_coef = distance.abs() / w_f;
 
             let t = min_value * color_coef + max_value * (1.0 - color_coef);
 
@@ -213,21 +240,5 @@ pub fn generate_linear_static_gradient(width: u32, height: u32) -> GrayImage {
         width * height
     );
 
-    GrayImage::from_raw(width, height, vec).unwrap()
-}
-
-// Warp this in a closure in order to pass it in when building a `Pheromones`
-// e.g. `|width: u32, height: u32| pheromones::generate_image_based_static_gradient(width, height, "images/slime.png")`
-pub fn generate_image_based_static_gradient(
-    width: u32,
-    height: u32,
-    image_path: impl AsRef<Path>,
-) -> GrayImage {
-    let river_img = ImageReader::open(image_path)
-        .expect("loading image file")
-        .decode()
-        .expect("decoding image file");
-    let resized_img = river_img.resize(width, height, image::imageops::FilterType::Gaussian);
-
-    resized_img.into_luma8()
+    vec
 }

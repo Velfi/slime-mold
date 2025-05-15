@@ -1,4 +1,5 @@
 #[derive(Clone, Copy, Debug)]
+#[derive(Default)]
 pub struct Point2 {
     pub x: f32,
     pub y: f32,
@@ -56,11 +57,3 @@ impl Point2 {
     }
 }
 
-impl Default for Point2 {
-    fn default() -> Self {
-        Point2 {
-            x: f32::default(),
-            y: f32::default(),
-        }
-    }
-}
