@@ -196,9 +196,19 @@ ENABLE_DYN_GRAD	{:?}
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
+        let old_width = self.settings.window_width as f32;
+        let old_height = self.settings.window_height as f32;
+        let new_width = width as f32;
+        let new_height = height as f32;
+
         self.settings.window_width = width;
         self.settings.window_height = height;
         self.boundary_rect = Rect::new(0, 0, width, height);
+
+        // Scale agent locations
+        for agent in self.agents.iter_mut() {
+            agent.scale_location(old_width, old_height, new_width, new_height);
+        }
 
         self.pheromones = Arc::new(RwLock::new(Pheromones::new(
             width,
@@ -442,8 +452,8 @@ ENABLE_DYN_GRAD	{:?}
             let workgroup_size_x = 8;
             let workgroup_size_y = 8;
             compute_pass.dispatch_workgroups(
-                (self.settings.window_width + workgroup_size_x - 1) / workgroup_size_x, // Ceil division
-                (self.settings.window_height + workgroup_size_y - 1) / workgroup_size_y, // Ceil division
+                self.settings.window_width.div_ceil(workgroup_size_x), // Ceil division
+                self.settings.window_height.div_ceil(workgroup_size_y), // Ceil division
                 1,
             );
         }

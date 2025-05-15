@@ -1,7 +1,6 @@
 use crate::{Agent, Point2};
 use log::debug;
 use nalgebra::DMatrix;
-use pollster;
 use std::borrow::Cow;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -135,7 +134,7 @@ async fn read_static_gradient_texel(
                 let data = buffer_slice.get_mapped_range();
                 // Ensure we only read the expected number of bytes for one f32
                 if data.len() >= std::mem::size_of::<f32>() {
-                    bytemuck::from_bytes::<f32>(&data[..std::mem::size_of::<f32>()]).clone()
+                    *bytemuck::from_bytes::<f32>(&data[..std::mem::size_of::<f32>()])
                 } else {
                     log::error!("Mapped buffer too small for f32. Size: {}", data.len());
                     staging_buffer.unmap();
@@ -237,8 +236,28 @@ impl Pheromones {
         let initial_data_size =
             (width * height * std::mem::size_of::<f32>() as u32) as wgpu::BufferAddress;
         if initial_data_size > 0 {
-            let initial_data_vec = vec![0.0f32; (width * height) as usize];
-            let initial_data_bytes = bytemuck::cast_slice(&initial_data_vec);
+            const COPY_BYTES_PER_ROW_ALIGNMENT: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+            let bytes_per_pixel = std::mem::size_of::<f32>() as u32;
+            let unaligned_bytes_per_row = bytes_per_pixel * width;
+            let aligned_bytes_per_row = (unaligned_bytes_per_row + COPY_BYTES_PER_ROW_ALIGNMENT
+                - 1)
+                & !(COPY_BYTES_PER_ROW_ALIGNMENT - 1);
+
+            let mut padded_initial_data_bytes =
+                Vec::with_capacity((aligned_bytes_per_row * height) as usize);
+            let single_row_unpadded_zeros_f32 = vec![0.0f32; width as usize];
+            let single_row_unpadded_bytes = bytemuck::cast_slice(&single_row_unpadded_zeros_f32);
+
+            for _ in 0..height {
+                padded_initial_data_bytes.extend_from_slice(single_row_unpadded_bytes);
+                if aligned_bytes_per_row > unaligned_bytes_per_row {
+                    padded_initial_data_bytes.resize(
+                        padded_initial_data_bytes.len()
+                            + (aligned_bytes_per_row - unaligned_bytes_per_row) as usize,
+                        0u8,
+                    );
+                }
+            }
 
             queue.write_texture(
                 wgpu::ImageCopyTexture {
@@ -247,10 +266,10 @@ impl Pheromones {
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                initial_data_bytes,
+                &padded_initial_data_bytes, // Use padded data
                 wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(std::mem::size_of::<f32>() as u32 * width),
+                    bytes_per_row: Some(aligned_bytes_per_row),
                     rows_per_image: Some(height),
                 },
                 texture_size,
@@ -262,10 +281,10 @@ impl Pheromones {
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
                 },
-                initial_data_bytes,
+                &padded_initial_data_bytes, // Use padded data
                 wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(std::mem::size_of::<f32>() as u32 * width),
+                    bytes_per_row: Some(aligned_bytes_per_row),
                     rows_per_image: Some(height),
                 },
                 texture_size,
@@ -489,23 +508,66 @@ impl Pheromones {
                     view_formats: &[],
                 });
 
-                queue.write_texture(
-                    wgpu::ImageCopyTexture {
-                        texture: &static_texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    bytemuck::cast_slice(&sg_vec),
-                    wgpu::ImageDataLayout {
-                        offset: 0,
-                        bytes_per_row: Some(std::mem::size_of::<f32>() as u32 * width),
-                        rows_per_image: Some(height),
-                    },
-                    texture_size,
-                );
-                static_gradient_texture_opt = Some(static_texture);
-                enable_static_gradient_flag = true;
+                const COPY_BYTES_PER_ROW_ALIGNMENT: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+                let bytes_per_pixel_sg = std::mem::size_of::<f32>() as u32; // Assuming f32 for static gradient
+                let unaligned_bytes_per_row_sg = bytes_per_pixel_sg * width;
+                let aligned_bytes_per_row_sg =
+                    (unaligned_bytes_per_row_sg + COPY_BYTES_PER_ROW_ALIGNMENT - 1)
+                        & !(COPY_BYTES_PER_ROW_ALIGNMENT - 1);
+
+                let sg_vec_bytes_unpadded = bytemuck::cast_slice(&sg_vec);
+                let mut padded_sg_data_bytes =
+                    Vec::with_capacity((aligned_bytes_per_row_sg * height) as usize);
+
+                for i in 0..height {
+                    let row_start_offset = (i * unaligned_bytes_per_row_sg) as usize;
+                    let row_end_offset = row_start_offset + unaligned_bytes_per_row_sg as usize;
+                    if row_end_offset <= sg_vec_bytes_unpadded.len() {
+                        // Ensure slice is within bounds
+                        padded_sg_data_bytes.extend_from_slice(
+                            &sg_vec_bytes_unpadded[row_start_offset..row_end_offset],
+                        );
+                        if aligned_bytes_per_row_sg > unaligned_bytes_per_row_sg {
+                            padded_sg_data_bytes.resize(
+                                padded_sg_data_bytes.len()
+                                    + (aligned_bytes_per_row_sg - unaligned_bytes_per_row_sg)
+                                        as usize,
+                                0u8,
+                            );
+                        }
+                    } else {
+                        // This case should not happen if sg_vec.len() == width * height
+                        log::error!(
+                            "Error preparing static gradient data: source data too small for row copy."
+                        );
+                        break;
+                    }
+                }
+
+                // Check if loop broke early due to error
+                if padded_sg_data_bytes.len() == (aligned_bytes_per_row_sg * height) as usize {
+                    queue.write_texture(
+                        wgpu::ImageCopyTexture {
+                            texture: &static_texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        &padded_sg_data_bytes, // Use padded data
+                        wgpu::ImageDataLayout {
+                            offset: 0,
+                            bytes_per_row: Some(aligned_bytes_per_row_sg),
+                            rows_per_image: Some(height),
+                        },
+                        texture_size,
+                    );
+                    static_gradient_texture_opt = Some(static_texture);
+                    enable_static_gradient_flag = true;
+                } else {
+                    log::error!(
+                        "Static gradient texture not written due to data preparation error."
+                    );
+                }
             } else {
                 debug!(
                     "Static gradient generator produced a Vec of incorrect size. Expected {}, got {}. Static gradient disabled.",
@@ -993,7 +1055,13 @@ impl Pheromones {
             );
         }
 
-        let buffer_size = self.width as u64 * self.height as u64 * bytes_per_pixel as u64;
+        const COPY_BYTES_PER_ROW_ALIGNMENT: u32 = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let unaligned_bytes_per_row = bytes_per_pixel * self.width;
+        let aligned_bytes_per_row = (unaligned_bytes_per_row + COPY_BYTES_PER_ROW_ALIGNMENT - 1)
+            & !(COPY_BYTES_PER_ROW_ALIGNMENT - 1);
+
+        // The buffer needs to be large enough for the COPY, considering aligned rows.
+        let buffer_size = aligned_bytes_per_row as u64 * self.height as u64;
 
         let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Pheromone Readback Staging Buffer"),
@@ -1019,8 +1087,8 @@ impl Pheromones {
                 buffer: &staging_buffer,
                 layout: wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(bytes_per_pixel * self.width),
-                    rows_per_image: Some(self.height),
+                    bytes_per_row: Some(aligned_bytes_per_row),
+                    rows_per_image: Some(self.height), // This should be self.height for full texture
                 },
             },
             wgpu::Extent3d {
@@ -1044,8 +1112,14 @@ impl Pheromones {
             .expect("Failed to map staging buffer");
 
         let data = buffer_slice.get_mapped_range();
-        let result_slice: &[f32] = bytemuck::cast_slice(&data);
-        let result_vec: Vec<f32> = result_slice.to_vec();
+
+        // Create a new Vec to hold the tightly packed data
+        let mut result_vec: Vec<f32> = Vec::with_capacity((self.width * self.height) as usize);
+        for row in 0..self.height {
+            let offset = (row * aligned_bytes_per_row) as usize;
+            let row_data = &data[offset..(offset + (self.width * bytes_per_pixel) as usize)];
+            result_vec.extend_from_slice(bytemuck::cast_slice(row_data));
+        }
 
         drop(data);
         staging_buffer.unmap();

@@ -8,14 +8,14 @@ windowHeight = 900
 windowFullscreen = false
 
 # Agent settings
-agentCount = 10000
+agentCount = 50000
 # If you want to delete all agents while the sim is running, set this to zero and back again
-agentCountMaximum = 10000
+agentCountMaximum = 50000
 agentJitter = 5.0
 # Min must always be < Max
 agentSpeedMin = 30.0
 agentSpeedMax = 50.0
-agentTurnSpeed = 10.0
+agentTurnSpeed = 5.0
 
 # Pheromone settings
 agentDepositionAmount = 1.0

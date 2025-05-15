@@ -21,7 +21,6 @@ use notify::INotifyWatcher;
 #[cfg(target_os = "windows")]
 use notify::ReadDirectoryChangesWatcher;
 use notify::{Error as NotifyError, Event as NotifyEvent, RecursiveMode, Watcher};
-use pheromones::Pheromones;
 pub use point2::Point2;
 use settings::Settings;
 use std::fs;

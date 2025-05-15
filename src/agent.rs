@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crate::{Pheromones, Point2, rect::Rect, settings::Settings};
+use crate::{Point2, pheromones::Pheromones, rect::Rect, settings::Settings};
 use log::trace;
 use num::{Float, NumCast};
 use rand::prelude::*;
@@ -201,6 +201,19 @@ impl Agent {
         if let Some(val) = update.deposition_amount {
             self.deposition_amount = val;
         }
+    }
+
+    pub fn scale_location(
+        &mut self,
+        old_width: f32,
+        old_height: f32,
+        new_width: f32,
+        new_height: f32,
+    ) {
+        let scale_x = new_width / old_width;
+        let scale_y = new_height / old_height;
+        self.location.x *= scale_x;
+        self.location.y *= scale_y;
     }
 }
 

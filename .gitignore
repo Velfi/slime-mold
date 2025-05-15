@@ -3,3 +3,4 @@
 /.vscode
 /images
 .DS_Store
+simulation_settings.toml
