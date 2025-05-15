@@ -8,6 +8,7 @@ use crate::{
 };
 use log::{error, info};
 use rayon::prelude::*;
+use std::fs;
 use std::sync::{Arc, RwLock};
 
 pub struct World {
@@ -18,6 +19,14 @@ pub struct World {
     boundary_rect: Rect<u32>,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
+
+    // New GPU resources for display texture conversion
+    display_texture: wgpu::Texture,
+    display_texture_view: wgpu::TextureView,
+    pheromone_data_buffer: wgpu::Buffer,
+    conversion_pipeline: wgpu::ComputePipeline,
+    conversion_bind_group_layout: wgpu::BindGroupLayout,
+    conversion_bind_group: wgpu::BindGroup,
 }
 
 impl World {
@@ -63,6 +72,104 @@ ENABLE_DYN_GRAD	{:?}
 
         let boundary_rect = Rect::new(0, 0, settings.window_width, settings.window_height);
 
+        // --- Initialize new GPU resources for display ---
+        let texture_size = wgpu::Extent3d {
+            width: settings.window_width,
+            height: settings.window_height,
+            depth_or_array_layers: 1,
+        };
+
+        let display_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("World Display Texture"),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm, // Shader writes rgba8unorm
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        let display_texture_view =
+            display_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let buffer_size = (settings.window_width
+            * settings.window_height
+            * std::mem::size_of::<f32>() as u32) as wgpu::BufferAddress;
+        let pheromone_data_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Pheromone Data Buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Load and create compute shader and pipeline
+        let shader_source_str = fs::read_to_string("src/shaders/world_convert.wgsl")
+            .expect("Failed to read world_convert.wgsl shader");
+        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("World Convert Shader Module"),
+            source: wgpu::ShaderSource::Wgsl(shader_source_str.into()),
+        });
+
+        let conversion_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("World Convert Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        // Pheromone values buffer
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None, // Buffer size checked at dispatch
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        // Output texture
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let conversion_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("World Convert Pipeline Layout"),
+                bind_group_layouts: &[&conversion_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let conversion_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("World Conversion Compute Pipeline"),
+                layout: Some(&conversion_pipeline_layout),
+                module: &shader_module,
+                entry_point: "main",
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            });
+
+        let conversion_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("World Convert Bind Group"),
+            layout: &conversion_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: pheromone_data_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&display_texture_view),
+                },
+            ],
+        });
+
         Self {
             agents,
             boundary_rect,
@@ -71,6 +178,12 @@ ENABLE_DYN_GRAD	{:?}
             settings,
             device,
             queue,
+            display_texture,
+            display_texture_view,
+            pheromone_data_buffer,
+            conversion_pipeline,
+            conversion_bind_group_layout,
+            conversion_bind_group,
         }
     }
 
@@ -96,7 +209,54 @@ ENABLE_DYN_GRAD	{:?}
             Arc::clone(&self.device),
             Arc::clone(&self.queue),
         )));
-        info!("World resized to {}x{}", width, height);
+        info!("World resized pheromones to {}x{}", width, height);
+
+        // --- Recreate GPU resources for display ---
+        let texture_size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+
+        self.display_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("World Display Texture"),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        self.display_texture_view = self
+            .display_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let buffer_size =
+            (width * height * std::mem::size_of::<f32>() as u32) as wgpu::BufferAddress;
+        self.pheromone_data_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Pheromone Data Buffer (Resized)"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Recreate bind group with new buffer and texture view
+        self.conversion_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("World Convert Bind Group (Resized)"),
+            layout: &self.conversion_bind_group_layout, // Layout is reused
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.pheromone_data_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.display_texture_view),
+                },
+            ],
+        });
+        info!("World display resources resized to {}x{}", width, height);
     }
 
     pub fn reload_settings(&mut self) -> Result<(), SlimeError> {
@@ -218,64 +378,80 @@ ENABLE_DYN_GRAD	{:?}
         // This cache will be used by agents in the *next* frame's sensing phase.
         pheromones_write_guard.update_cpu_read_cache();
 
+        // Drop the write guard before calling update_display_texture,
+        // as update_display_texture needs a read guard.
+        drop(pheromones_write_guard);
+
+        // New step: update our owned display texture using GPU
+        self.update_display_texture();
+
         // Agent population control (remains the same)
         if self.agents.len() > self.settings.agent_count_maximum {
             self.agents.truncate(self.settings.agent_count_maximum)
         }
     }
 
-    /// Draw the `World` state to the frame buffer.
-    ///
-    /// Assumes the default texture format: `wgpu::TextureFormat::Rgba8UnormSrgb`
-    /// Assumes that pheromone grid and pixel FB have same dimensions
-    pub fn draw(&self) -> Vec<u8> {
-        let num_rows = self.settings.window_height as usize;
-        let num_cols = self.settings.window_width as usize;
-        let mut frame_data = vec![0u8; num_rows * num_cols * 4]; // RGBA8
-
-        let pixel_iter = frame_data.par_chunks_exact_mut(4);
-
+    /// Updates the internal display_texture using a compute shader.
+    /// This replaces the CPU-bound logic of the old `draw` method.
+    pub fn update_display_texture(&self) {
         let pheromones_guard = self
             .pheromones
             .read()
-            .expect("couldn't get lock on pheromones for draw");
+            .expect("couldn't get lock on pheromones for display texture update");
 
-        // Read pheromone data from texture into a row-major Vec<f32>
         let pheromones_row_major = pheromones_guard.read_current_texture_to_vec();
 
-        // The old DMatrix access and manual row-major conversion is no longer needed:
-        // let matrix = pheromones_guard.get_current_grid();
-        // let mut pheromones_row_major: Vec<f32> = Vec::with_capacity(num_rows * num_cols);
-        // for r in 0..num_rows {
-        //     for c in 0..num_cols {
-        //         pheromones_row_major.push(matrix[(r, c)]);
-        //     }
-        // }
-
-        // Ensure the received vector has the expected size
-        if pheromones_row_major.len() != num_rows * num_cols {
-            error!(
-                "Pheromone data size mismatch. Expected {}, got {}. Returning empty frame.",
-                num_rows * num_cols,
-                pheromones_row_major.len()
-            );
-            // Return a black frame or handle error appropriately
-            return vec![0u8; num_rows * num_cols * 4];
+        if pheromones_row_major.is_empty() {
+            error!("Pheromone data is empty. Skipping display texture update.");
+            return;
         }
 
-        pixel_iter
-            .zip_eq(pheromones_row_major.par_iter()) // Use the new row-major Vec
-            .for_each(|(pixel, pheromone_value)| {
-                // clamp to renderable range
-                // map cell pheromone values to rgba pixels
-                // Ensure all operations are on f32 before final cast
-                let val_f32: f32 = *pheromone_value * 255.0f32;
-                let rounded_f32: f32 = val_f32.round();
-                let clamped_f32: f32 = rounded_f32.clamp(0.0f32, 255.0f32);
-                let val_u8: u8 = clamped_f32 as u8;
-                pixel.copy_from_slice(&[val_u8, val_u8, val_u8, 0xff]);
+        // Ensure buffer has correct size for the data.
+        // This should be guaranteed by resize logic, but a check might be good for safety.
+        let expected_buffer_elements = self.settings.window_width * self.settings.window_height;
+        if pheromones_row_major.len() != expected_buffer_elements as usize {
+            error!(
+                "Pheromone data size mismatch for display update. Expected {}, got {}. Skipping update.",
+                expected_buffer_elements,
+                pheromones_row_major.len()
+            );
+            return;
+        }
+
+        // Write pheromone data to GPU buffer
+        self.queue.write_buffer(
+            &self.pheromone_data_buffer,
+            0,
+            bytemuck::cast_slice(&pheromones_row_major),
+        );
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("World Display Texture Update Encoder"),
             });
 
-        frame_data
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("World Pheromone to RGBA Compute Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&self.conversion_pipeline);
+            compute_pass.set_bind_group(0, &self.conversion_bind_group, &[]);
+            // Dispatch based on texture size; workgroup size is 8x8 in shader
+            let workgroup_size_x = 8;
+            let workgroup_size_y = 8;
+            compute_pass.dispatch_workgroups(
+                (self.settings.window_width + workgroup_size_x - 1) / workgroup_size_x, // Ceil division
+                (self.settings.window_height + workgroup_size_y - 1) / workgroup_size_y, // Ceil division
+                1,
+            );
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Provides a view to the GPU-managed texture that holds the visual representation of pheromones.
+    pub fn get_display_texture_view(&self) -> &wgpu::TextureView {
+        &self.display_texture_view
     }
 }

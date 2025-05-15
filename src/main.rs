@@ -130,25 +130,7 @@ async fn run(event_loop: EventLoop<()>, window: Arc<Window>, initial_settings: S
     };
     surface.configure(&device, &config);
 
-    // Simulation texture
-    let mut texture_size = wgpu::Extent3d {
-        width: config.width,
-        height: config.height,
-        depth_or_array_layers: 1,
-    };
-
-    let mut sim_texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("Simulation Texture"),
-        size: texture_size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb, // Matches World::draw output
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-
-    let sim_texture_view = sim_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    // Sampler remains, as it's for sampling the world's display texture
     let sim_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("Simulation Sampler"),
         address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -162,7 +144,7 @@ async fn run(event_loop: EventLoop<()>, window: Arc<Window>, initial_settings: S
 
     // Shader
     let shader_source = wgpu::ShaderSource::Wgsl(
-        fs::read_to_string("src/shader.wgsl")
+        fs::read_to_string("src/shaders/display.wgsl")
             .expect("Should have been able to read the file")
             .into(),
     );
@@ -194,13 +176,17 @@ async fn run(event_loop: EventLoop<()>, window: Arc<Window>, initial_settings: S
         ],
     });
 
+    let mut world = World::new(current_settings, Arc::clone(&device), Arc::clone(&queue));
+
+    // Initialize bind_group using the texture view from the World
     let mut bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Texture Bind Group"),
         layout: &bind_group_layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::TextureView(&sim_texture_view),
+                // Get the display texture view from the world instance
+                resource: wgpu::BindingResource::TextureView(world.get_display_texture_view()),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
@@ -257,8 +243,6 @@ async fn run(event_loop: EventLoop<()>, window: Arc<Window>, initial_settings: S
     let _last_log_time = Instant::now();
     let _frame_times: CircularQueue<f32> = CircularQueue::with_capacity(60);
 
-    let mut world = World::new(current_settings, Arc::clone(&device), Arc::clone(&queue));
-
     let mut frame_time = 0.16;
     let mut time_of_last_frame_start = Instant::now();
     let mut frame_counter = 0;
@@ -285,28 +269,20 @@ async fn run(event_loop: EventLoop<()>, window: Arc<Window>, initial_settings: S
                     config.width = size.width;
                     config.height = size.height;
                     surface.configure(&device, &config);
-                    texture_size.width = config.width;
-                    texture_size.height = config.height;
 
-                    sim_texture = device.create_texture(&wgpu::TextureDescriptor {
-                        label: Some("Simulation Texture"),
-                        size: texture_size,
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                        view_formats: &[],
-                    });
-                    let sim_texture_view =
-                        sim_texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    // World handles its own texture resizing internally now
+                    world.resize(config.width, config.height);
+
+                    // Recreate bind group with the new texture view from the resized world
                     bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Texture Bind Group"),
+                        label: Some("Texture Bind Group (Resized)"),
                         layout: &bind_group_layout,
                         entries: &[
                             wgpu::BindGroupEntry {
                                 binding: 0,
-                                resource: wgpu::BindingResource::TextureView(&sim_texture_view),
+                                resource: wgpu::BindingResource::TextureView(
+                                    world.get_display_texture_view(),
+                                ),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,
@@ -314,7 +290,6 @@ async fn run(event_loop: EventLoop<()>, window: Arc<Window>, initial_settings: S
                             },
                         ],
                     });
-                    world.resize(config.width, config.height);
                 }
             }
         }
@@ -334,29 +309,20 @@ async fn run(event_loop: EventLoop<()>, window: Arc<Window>, initial_settings: S
                         config.width = physical_size.width;
                         config.height = physical_size.height;
                         surface.configure(&device, &config);
-                        texture_size.width = config.width;
-                        texture_size.height = config.height;
 
-                        sim_texture = device.create_texture(&wgpu::TextureDescriptor {
-                            label: Some("Simulation Texture"),
-                            size: texture_size,
-                            mip_level_count: 1,
-                            sample_count: 1,
-                            dimension: wgpu::TextureDimension::D2,
-                            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                                | wgpu::TextureUsages::COPY_DST,
-                            view_formats: &[],
-                        });
-                        let sim_texture_view =
-                            sim_texture.create_view(&wgpu::TextureViewDescriptor::default());
+                        // World handles its own texture resizing internally now
+                        world.resize(config.width, config.height);
+
+                        // Recreate bind group with the new texture view from the resized world
                         bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("Texture Bind Group"),
+                            label: Some("Texture Bind Group (Resized)"),
                             layout: &bind_group_layout,
                             entries: &[
                                 wgpu::BindGroupEntry {
                                     binding: 0,
-                                    resource: wgpu::BindingResource::TextureView(&sim_texture_view),
+                                    resource: wgpu::BindingResource::TextureView(
+                                        world.get_display_texture_view(),
+                                    ),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 1,
@@ -364,29 +330,13 @@ async fn run(event_loop: EventLoop<()>, window: Arc<Window>, initial_settings: S
                                 },
                             ],
                         });
-                        world.resize(config.width, config.height);
                     }
                 }
                 WindowEvent::RedrawRequested => {
-                    world.set_frame_time(frame_time); // Set frame time before drawing
-                    let frame_data = world.draw();
-                    if !frame_data.is_empty() && config.width > 0 && config.height > 0 {
-                        queue.write_texture(
-                            wgpu::ImageCopyTexture {
-                                texture: &sim_texture,
-                                mip_level: 0,
-                                origin: wgpu::Origin3d::ZERO,
-                                aspect: wgpu::TextureAspect::All,
-                            },
-                            &frame_data,
-                            wgpu::ImageDataLayout {
-                                offset: 0,
-                                bytes_per_row: Some(4 * config.width),
-                                rows_per_image: Some(config.height),
-                            },
-                            texture_size,
-                        );
-                    }
+                    world.set_frame_time(frame_time); // Set frame time before simulation step (world.update() will use this)
+
+                    // World's internal display texture is updated during world.update()
+                    // No direct world.draw() call or frame_data needed here.
 
                     match surface.get_current_texture() {
                         Ok(output_frame) => {
