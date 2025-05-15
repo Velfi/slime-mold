@@ -46,11 +46,8 @@ where
     }
 }
 
-impl<T> Rect<T>
-where
-    T: Add<Output = T> + Copy + PartialEq + Into<f64>,
-{
-    pub fn contains(&self, other: &Point2<f64>) -> bool {
+impl Rect<f32> {
+    pub fn contains(&self, other: &Point2) -> bool {
         other.x >= self.x_min().into()
             && other.x < self.x_max().into()
             && other.y >= self.y_min().into()
@@ -59,19 +56,19 @@ where
 }
 
 impl Rect<u32> {
-    pub fn clamp(&self, other: &mut Point2<f64>) {
-        if other.x >= self.x_min() as f64
-            && other.x < self.x_max() as f64
-            && other.y >= self.y_min() as f64
-            && other.y < self.y_max() as f64
+    pub fn clamp(&self, other: &mut Point2) {
+        if other.x >= self.x_min() as f32
+            && other.x < self.x_max() as f32
+            && other.y >= self.y_min() as f32
+            && other.y < self.y_max() as f32
         {
         } else {
             let x = other
                 .x
-                .clamp(self.x_min() as f64, self.x_max() as f64 - 1.0);
+                .clamp(self.x_min() as f32, self.x_max() as f32 - 1.0);
             let y = other
                 .y
-                .clamp(self.y_min() as f64, self.y_max() as f64 - 1.0);
+                .clamp(self.y_min() as f32, self.y_max() as f32 - 1.0);
 
             other.move_absolute(x, y)
         }

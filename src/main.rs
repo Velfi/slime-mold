@@ -95,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(0);
                 }
 
-                frame_time = time_of_last_frame_start.elapsed().as_secs_f64();
+                frame_time = time_of_last_frame_start.elapsed().as_secs_f32();
                 time_of_last_frame_start = Instant::now();
 
                 frame_counter += 1;

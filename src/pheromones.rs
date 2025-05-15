@@ -12,8 +12,8 @@ pub struct Pheromones {
     enable_static_gradient: bool,
     enable_dynamic_gradient: bool,
     decay_factor: u8,
-    _deposit_size: f64,
-    _diffuse_size: f64,
+    _deposit_size: f32,
+    _diffuse_size: f32,
     height: u32,
     width: u32,
 }
@@ -61,10 +61,10 @@ impl Pheromones {
     }
 
     // TODO make this a wrapping get
-    pub fn get_reading(&self, at_location: Point2<f64>) -> Option<i32> {
+    pub fn get_reading(&self, at_location: Point2) -> Option<i32> {
         let (x, y) = (at_location.x.round(), at_location.y.round());
         let is_within_bounds =
-            x >= 0.0 && x < self.width as f64 && y >= 0.0 && y < self.height as f64;
+            x >= 0.0 && x < self.width as f32 && y >= 0.0 && y < self.height as f32;
 
         if is_within_bounds {
             let (x, y) = (x as u32, y as u32);
@@ -102,15 +102,15 @@ impl Pheromones {
     }
 
     fn deposit_individual_agent(&mut self, agent: &Agent) {
-        let location_to_deposit: Point2<u32> = agent.location().into();
+        let location_to_deposit: Point2 = agent.location().into();
         let is_within_bounds =
-            location_to_deposit.x < self.width && location_to_deposit.y < self.height;
+            location_to_deposit.x < self.width as f32 && location_to_deposit.y < self.height as f32;
 
         if is_within_bounds {
             let grid_ref = self
                 .grid
                 .mut_a()
-                .get_pixel_mut(location_to_deposit.x, location_to_deposit.y);
+                .get_pixel_mut(location_to_deposit.x as u32, location_to_deposit.y as u32);
 
             *grid_ref = [agent.deposition_amount()].into();
         } else {
@@ -154,15 +154,15 @@ pub trait StaticGradientGenerator {
 
 // TODO only works if height == width
 pub fn generate_circular_static_gradient(width: u32, height: u32) -> GrayImage {
-    let min_value: f64 = 0.0;
-    let max_value: f64 = 255.0;
-    let root_2 = 2.0f64.sqrt();
+    let min_value: f32 = 0.0;
+    let max_value: f32 = 255.0;
+    let root_2 = 2.0f32.sqrt();
 
     let vec: Vec<_> = (0..width)
-        .flat_map(|x| (0..height).map(move |y| (x as f64, y as f64)))
+        .flat_map(|x| (0..height).map(move |y| (x as f32, y as f32)))
         .map(|(x, y)| {
-            let width = width as f64;
-            let height = height as f64;
+            let width = width as f32;
+            let height = height as f32;
             let mut distance_to_center =
                 ((x - width / 2.0).powi(2) + (y - height / 2.0).powi(2)).sqrt();
 
@@ -186,16 +186,16 @@ pub fn generate_circular_static_gradient(width: u32, height: u32) -> GrayImage {
 
 // TODO replace custom gradient generation with raqote?
 pub fn generate_linear_static_gradient(width: u32, height: u32) -> GrayImage {
-    let min_value: f64 = 0.0;
-    let max_value: f64 = 255.0;
-    let a: f64 = -0.6;
-    let b: f64 = -1.0;
-    let c: f64 = width as f64 - (width as f64 / 4.0);
+    let min_value: f32 = 0.0;
+    let max_value: f32 = 255.0;
+    let a: f32 = -0.6;
+    let b: f32 = -1.0;
+    let c: f32 = width as f32 - (width as f32 / 4.0);
 
     let vec: Vec<_> = (0..width)
-        .flat_map(|x| (0..height).map(move |y| (x as f64, y as f64)))
+        .flat_map(|x| (0..height).map(move |y| (x as f32, y as f32)))
         .map(|(x, y)| {
-            let width = width as f64;
+            let width = width as f32;
 
             let distance = (a * x + b * y + c) / (a * a + b * b).sqrt();
             let color_coef = distance.abs() / width;

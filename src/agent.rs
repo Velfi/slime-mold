@@ -11,25 +11,25 @@ pub type SensorReading = (i32, i32, i32);
 
 #[derive(TypedBuilder)]
 pub struct Agent {
-    location: Point2<f64>,
+    location: Point2,
     // The heading an agent is facing. (In degrees)
     #[builder(default)]
-    heading: f64,
+    heading: f32,
     // There are three sensors per agent: A center sensor, a left sensor, and a right sensor. The side sensors are positioned based on this angle. (In degrees)
-    #[builder(default = 45.0f64)]
-    sensor_angle: f64,
+    #[builder(default = 45.0f32)]
+    sensor_angle: f32,
     // How far out a sensor is from the agent
-    #[builder(default = 9.0f64)]
-    sensor_distance: f64,
+    #[builder(default = 9.0f32)]
+    sensor_distance: f32,
     // How far out a sensor is from the agent
-    #[builder(default = 1.0f64)]
-    move_speed: f64,
+    #[builder(default = 1.0f32)]
+    move_speed: f32,
     // How quickly the agent can rotate
-    #[builder(default = 20.0f64)]
-    rotation_speed: f64,
+    #[builder(default = 20.0f32)]
+    rotation_speed: f32,
     // The tendency of agents to move erratically
-    #[builder(default = 0.0f64)]
-    jitter: f64,
+    #[builder(default = 0.0f32)]
+    jitter: f32,
     #[builder(default = default_rng())]
     rng: StdRng,
     deposition_amount: u8,
@@ -37,13 +37,13 @@ pub struct Agent {
 
 #[derive(Default)]
 pub struct AgentUpdate {
-    pub location: Option<Point2<f64>>,
-    pub heading: Option<f64>,
-    pub sensor_angle: Option<f64>,
-    pub sensor_distance: Option<f64>,
-    pub move_speed: Option<f64>,
-    pub rotation_speed: Option<f64>,
-    pub jitter: Option<f64>,
+    pub location: Option<Point2>,
+    pub heading: Option<f32>,
+    pub sensor_angle: Option<f32>,
+    pub sensor_distance: Option<f32>,
+    pub move_speed: Option<f32>,
+    pub rotation_speed: Option<f32>,
+    pub jitter: Option<f32>,
     pub deposition_amount: Option<u8>,
 }
 
@@ -53,8 +53,8 @@ impl Agent {
         let deposition_amount = settings.agent_deposition_amount;
         let move_speed = rng.random_range(settings.agent_speed_min..settings.agent_speed_max);
         let location = Point2::new(
-            rng.random_range(0.0..(settings.window_width as f64)),
-            rng.random_range(0.0..(settings.window_height as f64)),
+            rng.random_range(0.0..(settings.window_width as f32)),
+            rng.random_range(0.0..(settings.window_height as f32)),
         );
         let heading = rng.random_range(settings.agent_possible_starting_headings.clone());
 
@@ -69,7 +69,7 @@ impl Agent {
             .build()
     }
 
-    pub fn update(&mut self, pheromones: &Pheromones, delta_t: f64, boundary_rect: &Rect<u32>) {
+    pub fn update(&mut self, pheromones: &Pheromones, delta_t: f32, boundary_rect: &Rect<u32>) {
         let sensory_input = self.sense(pheromones, boundary_rect);
         let rotation_towards_sensory_input = self.judge_sensory_input(sensory_input);
         self.rotate(rotation_towards_sensory_input);
@@ -83,7 +83,7 @@ impl Agent {
         );
     }
 
-    pub fn judge_sensory_input(&mut self, (l_reading, c_reading, r_reading): SensorReading) -> f64 {
+    pub fn judge_sensory_input(&mut self, (l_reading, c_reading, r_reading): SensorReading) -> f32 {
         if c_reading > l_reading && c_reading > r_reading {
             // do nothing, stay facing same direction
             trace!("Agent's center value is greatest, doing nothing");
@@ -113,7 +113,7 @@ impl Agent {
         }
     }
 
-    pub fn location(&self) -> Point2<f64> {
+    pub fn location(&self) -> Point2 {
         self.location
     }
 
@@ -121,7 +121,7 @@ impl Agent {
         self.deposition_amount
     }
 
-    pub fn set_new_random_move_speed_in_range(&mut self, move_speed_range: Range<f64>) {
+    pub fn set_new_random_move_speed_in_range(&mut self, move_speed_range: Range<f32>) {
         self.move_speed = self.rng.random_range(move_speed_range);
         trace!("set agent's speed to {}", self.move_speed);
     }
@@ -166,12 +166,12 @@ impl Agent {
         (sensor_l_reading, sensor_c_reading, sensor_r_reading)
     }
 
-    pub fn rotate(&mut self, mut rotation_in_degrees: f64) {
+    pub fn rotate(&mut self, mut rotation_in_degrees: f32) {
         if self.jitter != 0.0 {
             let magnitude = if self.rng.random() {
-                self.rng.random::<f64>()
+                self.rng.random::<f32>()
             } else {
-                self.rng.random::<f64>() * -1.0
+                self.rng.random::<f32>() * -1.0
             };
             // Randomly adjust rotation amount
             rotation_in_degrees += self.jitter * magnitude;
@@ -228,10 +228,10 @@ fn rotate_by_degrees<T: Float>(n: T, rotation_in_degrees: T) -> T {
 }
 
 pub fn move_in_direction_of_heading(
-    location: &mut Point2<f64>,
-    heading: f64,
-    speed: f64,
-    delta_t: f64,
+    location: &mut Point2,
+    heading: f32,
+    speed: f32,
+    delta_t: f32,
     boundary_rect: &Rect<u32>,
 ) {
     let heading_in_radians = heading.to_radians();
@@ -245,37 +245,37 @@ pub fn move_in_direction_of_heading(
 }
 
 #[allow(dead_code)]
-pub fn move_relative_wrapping(xy: &mut Point2<f64>, x: f64, y: f64, boundary_rect: &Rect<u32>) {
+pub fn move_relative_wrapping(xy: &mut Point2, x: f32, y: f32, boundary_rect: &Rect<u32>) {
     xy.x += x;
     xy.y += y;
 
-    if xy.x >= boundary_rect.x_max() as f64 {
-        xy.x -= boundary_rect.x_max() as f64;
-    } else if xy.x < boundary_rect.x_min() as f64 {
-        xy.x += boundary_rect.x_max() as f64;
+    if xy.x >= boundary_rect.x_max() as f32 {
+        xy.x -= boundary_rect.x_max() as f32;
+    } else if xy.x < boundary_rect.x_min() as f32 {
+        xy.x += boundary_rect.x_max() as f32;
     }
 
-    if xy.y >= boundary_rect.y_max() as f64 {
-        xy.y -= boundary_rect.y_max() as f64;
-    } else if xy.y < boundary_rect.y_min() as f64 {
-        xy.y += boundary_rect.y_max() as f64;
+    if xy.y >= boundary_rect.y_max() as f32 {
+        xy.y -= boundary_rect.y_max() as f32;
+    } else if xy.y < boundary_rect.y_min() as f32 {
+        xy.y += boundary_rect.y_max() as f32;
     }
 }
 
-pub fn move_relative_clamping(xy: &mut Point2<f64>, x: f64, y: f64, boundary_rect: &Rect<u32>) {
+pub fn move_relative_clamping(xy: &mut Point2, x: f32, y: f32, boundary_rect: &Rect<u32>) {
     xy.x += x;
     xy.y += y;
 
-    if xy.x > boundary_rect.x_max() as f64 {
-        xy.x = boundary_rect.x_max() as f64;
-    } else if xy.x < boundary_rect.x_min() as f64 {
-        xy.x = boundary_rect.x_min() as f64;
+    if xy.x > boundary_rect.x_max() as f32 {
+        xy.x = boundary_rect.x_max() as f32;
+    } else if xy.x < boundary_rect.x_min() as f32 {
+        xy.x = boundary_rect.x_min() as f32;
     }
 
-    if xy.y > boundary_rect.y_max() as f64 {
-        xy.y = boundary_rect.y_max() as f64;
-    } else if xy.y < boundary_rect.y_min() as f64 {
-        xy.y = boundary_rect.y_min() as f64;
+    if xy.y > boundary_rect.y_max() as f32 {
+        xy.y = boundary_rect.y_max() as f32;
+    } else if xy.y < boundary_rect.y_min() as f32 {
+        xy.y = boundary_rect.y_min() as f32;
     }
 }
 

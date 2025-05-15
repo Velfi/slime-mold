@@ -11,11 +11,11 @@ pub const IS_FULLSCREEN: bool = false;
 // Agent settings
 pub const AGENT_COUNT: usize = 10000;
 pub const AGENT_COUNT_MAXIMUM: usize = 100000;
-pub const AGENT_JITTER: f64 = 10.0;
-pub const AGENT_SPEED_MIN: f64 = 0.5 + 20.0;
-pub const AGENT_SPEED_MAX: f64 = 1.2 + 20.0;
-pub const AGENT_TURN_SPEED: f64 = 20.0;
-pub const AGENT_POSSIBLE_STARTING_HEADINGS: std::ops::Range<f64> = 0.0..360.0;
+pub const AGENT_JITTER: f32 = 10.0;
+pub const AGENT_SPEED_MIN: f32 = 0.5 + 20.0;
+pub const AGENT_SPEED_MAX: f32 = 1.2 + 20.0;
+pub const AGENT_TURN_SPEED: f32 = 20.0;
+pub const AGENT_POSSIBLE_STARTING_HEADINGS: std::ops::Range<f32> = 0.0..360.0;
 pub const DEPOSITION_AMOUNT: u8 = u8::MAX;
 
 // Pheromone settings
@@ -30,11 +30,11 @@ pub struct Settings {
     pub window_fullscreen: bool,
     pub agent_count: usize,
     pub agent_count_maximum: usize,
-    pub agent_jitter: f64,
-    pub agent_speed_min: f64,
-    pub agent_speed_max: f64,
-    pub agent_turn_speed: f64,
-    pub agent_possible_starting_headings: Range<f64>,
+    pub agent_jitter: f32,
+    pub agent_speed_min: f32,
+    pub agent_speed_max: f32,
+    pub agent_turn_speed: f32,
+    pub agent_possible_starting_headings: Range<f32>,
     pub agent_deposition_amount: u8,
     pub pheromone_decay_factor: u8,
     pub pheromone_enable_dynamic_gradient: bool,

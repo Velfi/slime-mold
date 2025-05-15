@@ -14,7 +14,7 @@ use std::sync::{Arc, RwLock};
 
 pub struct World {
     agents: Vec<Agent>,
-    frame_time: f64,
+    frame_time: f32,
     gradient: Arc<Box<dyn colorgrad::Gradient + Sync + Send>>,
     pheromones: Arc<RwLock<Pheromones>>,
     /// A toggle for rendering in color vs. black & white mode. Color mode has an FPS cost so we render in B&W by default
@@ -111,7 +111,7 @@ ENABLE_DYN_GRAD	{:?}
         Ok(())
     }
 
-    pub fn set_frame_time(&mut self, frame_time: f64) {
+    pub fn set_frame_time(&mut self, frame_time: f32) {
         self.frame_time = frame_time;
     }
 
@@ -233,9 +233,9 @@ ENABLE_DYN_GRAD	{:?}
                     ]);
                 } else {
                     let pheromone_value = map_range(
-                        *pheromone_value as f64,
-                        u8::MIN as f64,
-                        u8::MAX as f64,
+                        *pheromone_value as f32,
+                        u8::MIN as f32,
+                        u8::MAX as f32,
                         0.0,
                         1.0,
                     );
