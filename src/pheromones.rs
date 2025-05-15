@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::{Agent, Point2, Swapper};
 use log::{debug, trace};
 
@@ -123,7 +121,7 @@ impl Pheromones {
     pub fn decay(&mut self) {
         let decay_factor = self.decay_factor;
         self.grid.mut_a().iter_mut().for_each(|pheromone_reading| {
-            *pheromone_reading = *pheromone_reading * (1.0 - decay_factor);
+            *pheromone_reading *= 1.0 - decay_factor;
         })
     }
 
@@ -179,72 +177,4 @@ fn box_filter(
         }
     }
     out_data
-}
-
-pub trait StaticGradientGenerator {
-    fn generate(width: u32, height: u32) -> Vec<f32>;
-}
-
-// TODO only works if height == width
-pub fn generate_circular_static_gradient(width: u32, height: u32) -> Vec<f32> {
-    let min_value: f32 = 0.0;
-    let max_value: f32 = 1.0; // Changed max_value to 1.0 for f32 representation
-    let root_2 = 2.0f32.sqrt();
-
-    let vec: Vec<_> = (0..width)
-        .flat_map(|x_coord| (0..height).map(move |y_coord| (x_coord as f32, y_coord as f32)))
-        .map(|(x_f, y_f)| {
-            let w_f = width as f32;
-            let h_f = height as f32;
-            let mut distance_to_center =
-                ((x_f - w_f / 2.0).powi(2) + (y_f - h_f / 2.0).powi(2)).sqrt();
-
-            distance_to_center /= root_2 * w_f / 2.0;
-
-            let t = min_value * distance_to_center + max_value * (1.0 - distance_to_center);
-
-            t
-        })
-        .collect();
-
-    assert!(
-        vec.len() == (width * height) as usize,
-        "Vector length is {} but width * height is {}",
-        vec.len(),
-        width * height
-    );
-
-    vec
-}
-
-// TODO replace custom gradient generation with raqote?
-pub fn generate_linear_static_gradient(width: u32, height: u32) -> Vec<f32> {
-    let min_value: f32 = 0.0;
-    let max_value: f32 = 1.0; // Changed max_value to 1.0 for f32 representation
-    let a: f32 = -0.6;
-    let b: f32 = -1.0;
-    let c: f32 = width as f32 - (width as f32 / 4.0);
-
-    let vec: Vec<_> = (0..width)
-        .flat_map(|x_coord| (0..height).map(move |y_coord| (x_coord as f32, y_coord as f32)))
-        .map(|(x_f, y_f)| {
-            let w_f = width as f32;
-
-            let distance = (a * x_f + b * y_f + c) / (a * a + b * b).sqrt();
-            let color_coef = distance.abs() / w_f;
-
-            let t = min_value * color_coef + max_value * (1.0 - color_coef);
-
-            t
-        })
-        .collect();
-
-    assert!(
-        vec.len() == (width * height) as usize,
-        "Vector length is {} but width * height is {}",
-        vec.len(),
-        width * height
-    );
-
-    vec
 }
