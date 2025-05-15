@@ -4,8 +4,8 @@ use crate::{Agent, Point2, Swapper};
 use log::{debug, trace};
 
 pub struct Pheromones {
-    grid: Swapper<Vec<u8>>,
-    static_gradient: Option<Vec<u8>>,
+    grid: Swapper<Vec<f32>>,
+    static_gradient: Option<Vec<f32>>,
     enable_static_gradient: bool,
     enable_dynamic_gradient: bool,
     decay_factor: f32,
@@ -19,9 +19,9 @@ impl Pheromones {
         height: u32,
         decay_factor: f32,
         enable_dynamic_gradient: bool,
-        static_gradient_generator: Option<Box<dyn Fn(u32, u32) -> Vec<u8>>>, // Changed return type
+        static_gradient_generator: Option<Box<dyn Fn(u32, u32) -> Vec<f32>>>, // Changed return type
     ) -> Self {
-        let grid_data = vec![0u8; (width * height) as usize]; // Initialize Vec<u8>
+        let grid_data = vec![0.0f32; (width * height) as usize]; // Initialize Vec<f32>
         let mut static_gradient = None;
         let mut enable_static_gradient = false;
 
@@ -48,7 +48,7 @@ impl Pheromones {
         }
     }
 
-    pub fn static_gradient(&self) -> Option<&Vec<u8>> {
+    pub fn static_gradient(&self) -> Option<&Vec<f32>> {
         // Changed return type
         self.static_gradient.as_ref()
     }
@@ -71,13 +71,13 @@ impl Pheromones {
                         .as_ref()
                         .map(|grid_data| grid_data[index]);
 
-                    static_value.map(|sv| (sv + pheromone_value) as i32)
+                    static_value.map(|sv| ((sv + pheromone_value) * 255.0).round() as i32)
                 }
-                (true, false) => Some(self.grid.a()[index] as i32),
+                (true, false) => Some((self.grid.a()[index] * 255.0).round() as i32),
                 (false, true) => self
                     .static_gradient
                     .as_ref()
-                    .map(|grid_data| grid_data[index] as i32),
+                    .map(|grid_data| (grid_data[index] * 255.0).round() as i32),
                 (false, false) => Some(0),
             }
         } else {
@@ -108,7 +108,7 @@ impl Pheromones {
             let y = y_f32 as u32;
             let index = (y * self.width + x) as usize;
 
-            self.grid.mut_a()[index] = (agent.deposition_amount() * 255.0).round() as u8;
+            self.grid.mut_a()[index] = agent.deposition_amount();
         } else {
             trace!("agent out of bounds at ({})", location_to_deposit)
         }
@@ -123,7 +123,7 @@ impl Pheromones {
     pub fn decay(&mut self) {
         let decay_factor = self.decay_factor;
         self.grid.mut_a().iter_mut().for_each(|pheromone_reading| {
-            *pheromone_reading = (*pheromone_reading as f32 * (1.0 - decay_factor)).round() as u8;
+            *pheromone_reading = *pheromone_reading * (1.0 - decay_factor);
         })
     }
 
@@ -131,7 +131,7 @@ impl Pheromones {
         self.decay_factor = decay_factor;
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &u8> {
+    pub fn iter(&self) -> impl Iterator<Item = &f32> {
         self.grid.a().iter()
     }
 
@@ -144,8 +144,14 @@ impl Pheromones {
     }
 }
 
-fn box_filter(image_data: &[u8], width: u32, height: u32, x_radius: u32, y_radius: u32) -> Vec<u8> {
-    let mut out_data = vec![0u8; (width * height) as usize];
+fn box_filter(
+    image_data: &[f32],
+    width: u32,
+    height: u32,
+    x_radius: u32,
+    y_radius: u32,
+) -> Vec<f32> {
+    let mut out_data = vec![0.0f32; (width * height) as usize];
 
     let kernel_width = 2 * x_radius + 1;
     let kernel_height = 2 * y_radius + 1;
@@ -164,10 +170,10 @@ fn box_filter(image_data: &[u8], width: u32, height: u32, x_radius: u32, y_radiu
                         .min(height as i32 - 1) as u32;
 
                     let index_in = (y_in * width + x_in) as usize;
-                    sum += image_data[index_in] as f32;
+                    sum += image_data[index_in];
                 }
             }
-            let avg = (sum / kernel_size).round() as u8;
+            let avg = sum / kernel_size;
             let index_out = (y_out * width + x_out) as usize;
             out_data[index_out] = avg;
         }
@@ -176,13 +182,13 @@ fn box_filter(image_data: &[u8], width: u32, height: u32, x_radius: u32, y_radiu
 }
 
 pub trait StaticGradientGenerator {
-    fn generate(width: u32, height: u32) -> Vec<u8>;
+    fn generate(width: u32, height: u32) -> Vec<f32>;
 }
 
 // TODO only works if height == width
-pub fn generate_circular_static_gradient(width: u32, height: u32) -> Vec<u8> {
+pub fn generate_circular_static_gradient(width: u32, height: u32) -> Vec<f32> {
     let min_value: f32 = 0.0;
-    let max_value: f32 = 255.0;
+    let max_value: f32 = 1.0; // Changed max_value to 1.0 for f32 representation
     let root_2 = 2.0f32.sqrt();
 
     let vec: Vec<_> = (0..width)
@@ -197,7 +203,7 @@ pub fn generate_circular_static_gradient(width: u32, height: u32) -> Vec<u8> {
 
             let t = min_value * distance_to_center + max_value * (1.0 - distance_to_center);
 
-            t.round() as u8
+            t
         })
         .collect();
 
@@ -212,9 +218,9 @@ pub fn generate_circular_static_gradient(width: u32, height: u32) -> Vec<u8> {
 }
 
 // TODO replace custom gradient generation with raqote?
-pub fn generate_linear_static_gradient(width: u32, height: u32) -> Vec<u8> {
+pub fn generate_linear_static_gradient(width: u32, height: u32) -> Vec<f32> {
     let min_value: f32 = 0.0;
-    let max_value: f32 = 255.0;
+    let max_value: f32 = 1.0; // Changed max_value to 1.0 for f32 representation
     let a: f32 = -0.6;
     let b: f32 = -1.0;
     let c: f32 = width as f32 - (width as f32 / 4.0);
@@ -229,7 +235,7 @@ pub fn generate_linear_static_gradient(width: u32, height: u32) -> Vec<u8> {
 
             let t = min_value * color_coef + max_value * (1.0 - color_coef);
 
-            t.round() as u8
+            t
         })
         .collect();
 

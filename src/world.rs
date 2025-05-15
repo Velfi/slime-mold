@@ -5,7 +5,6 @@ use crate::{
     pheromones::Pheromones,
     rect::Rect,
     settings::Settings,
-    util::map_range,
 };
 use colorgrad::preset::viridis;
 use log::{error, info};
@@ -225,21 +224,16 @@ ENABLE_DYN_GRAD	{:?}
                 // clamp to renderable range
                 // map cell pheromone values to rgba pixels
                 if self.black_and_white_mode {
-                    pixel.copy_from_slice(&[
-                        *pheromone_value,
-                        *pheromone_value,
-                        *pheromone_value,
-                        0xff,
-                    ]);
+                    // Ensure all operations are on f32 before final cast
+                    let val_f32: f32 = *pheromone_value * 255.0f32;
+                    let rounded_f32: f32 = val_f32.round();
+                    let clamped_f32: f32 = rounded_f32.clamp(0.0f32, 255.0f32);
+                    let val_u8: u8 = clamped_f32 as u8;
+                    pixel.copy_from_slice(&[val_u8, val_u8, val_u8, 0xff]);
                 } else {
-                    let pheromone_value = map_range(
-                        *pheromone_value as f32,
-                        u8::MIN as f32,
-                        u8::MAX as f32,
-                        0.0,
-                        1.0,
-                    );
-                    let rgba = gradient.at(pheromone_value).to_rgba8();
+                    // Ensure pheromone_value is dereferenced and clamped as f32 before casting to f64
+                    let clamped_pheromone = (*pheromone_value).clamp(0.0f32, 1.0f32);
+                    let rgba = gradient.at(clamped_pheromone).to_rgba8(); // colorgrad::Gradient::at expects f64
                     pixel.copy_from_slice(&rgba);
                 }
             });

@@ -7,7 +7,6 @@ mod point2;
 mod rect;
 mod settings;
 mod swapper;
-mod util;
 mod world;
 
 pub use agent::Agent;
