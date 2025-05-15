@@ -76,6 +76,31 @@ ENABLE_DYN_GRAD	{:?}
         }
     }
 
+    pub fn window_width(&self) -> u32 {
+        self.settings.window_width
+    }
+
+    pub fn window_height(&self) -> u32 {
+        self.settings.window_height
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.settings.window_width = width;
+        self.settings.window_height = height;
+        self.boundary_rect = Rect::new(0, 0, width, height);
+        // Recreate pheromones with new dimensions
+        // Assuming Pheromones::new takes width, height, decay_factor, enable_dynamic_gradient, and an optional static_gradient_generator
+        // We need to decide how to handle the static_gradient_generator on resize. For now, passing None.
+        self.pheromones = Arc::new(RwLock::new(Pheromones::new(
+            width,
+            height,
+            self.settings.pheromone_decay_factor,
+            self.settings.pheromone_enable_dynamic_gradient,
+            None, // Or handle static gradient regeneration if needed
+        )));
+        info!("World resized to {}x{}", width, height);
+    }
+
     pub fn reload_settings(&mut self) -> Result<(), SlimeError> {
         let new_settings = Settings::load_from_file(DEFAULT_SETTINGS_FILE)?;
         let agent_settings_changed = self.settings.did_agent_settings_change(&new_settings);
@@ -203,23 +228,37 @@ ENABLE_DYN_GRAD	{:?}
     ///
     /// Assumes the default texture format: `wgpu::TextureFormat::Rgba8UnormSrgb`
     /// Assumes that pheromone grid and pixel FB have same dimensions
-    pub fn draw(&self, frame: &mut [u8]) {
-        let pixel_iter = frame.par_chunks_exact_mut(4);
+    pub fn draw(&self) -> Vec<u8> {
+        let num_rows = self.settings.window_height as usize;
+        let num_cols = self.settings.window_width as usize;
+        let mut frame_data = vec![0u8; num_rows * num_cols * 4]; // RGBA8
+
+        let pixel_iter = frame_data.par_chunks_exact_mut(4);
         let gradient = Arc::clone(&self.gradient);
-        // TODO Grid doesn't support parallel iterators, what do?
-        let pheromones: Vec<_> = self
+
+        let pheromones_guard = self
             .pheromones
             .read()
-            .expect("couldn't get lock on pheromones for draw")
-            // Uncomment to enable rendering of the static gradient for debugging
-            // .static_gradient()
-            // .unwrap()
-            .iter()
-            .map(ToOwned::to_owned)
-            .collect();
+            .expect("couldn't get lock on pheromones for draw");
+
+        // Access the underlying DMatrix
+        // The Pheromones::iter() method used self.grid.a().iter(), which is column-major.
+        // We need to iterate self.grid.a() in row-major order.
+        let matrix = pheromones_guard.get_current_grid(); // This is &DMatrix<f32>
+
+        // Uncomment to enable rendering of the static gradient for debugging
+        // let matrix = pheromones_guard.static_gradient().expect("Static gradient not available for drawing");
+
+        let mut pheromones_row_major: Vec<f32> = Vec::with_capacity(num_rows * num_cols);
+
+        for r in 0..num_rows {
+            for c in 0..num_cols {
+                pheromones_row_major.push(matrix[(r, c)]);
+            }
+        }
 
         pixel_iter
-            .zip_eq(pheromones.par_iter())
+            .zip_eq(pheromones_row_major.par_iter()) // Use the new row-major Vec
             .for_each(|(pixel, pheromone_value)| {
                 // clamp to renderable range
                 // map cell pheromone values to rgba pixels
@@ -237,5 +276,7 @@ ENABLE_DYN_GRAD	{:?}
                     pixel.copy_from_slice(&rgba);
                 }
             });
+
+        frame_data
     }
 }

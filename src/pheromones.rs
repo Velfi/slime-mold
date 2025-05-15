@@ -2,6 +2,8 @@ use crate::{Agent, Point2, Swapper};
 use log::{debug, trace};
 use nalgebra::DMatrix;
 
+pub type StaticGradientGeneratorFn = Box<dyn Fn(u32, u32) -> Vec<f32>>;
+
 pub struct Pheromones {
     grid: Swapper<DMatrix<f32>>,
     static_gradient: Option<DMatrix<f32>>,
@@ -18,7 +20,7 @@ impl Pheromones {
         height: u32,
         decay_factor: f32,
         enable_dynamic_gradient: bool,
-        static_gradient_generator: Option<Box<dyn Fn(u32, u32) -> Vec<f32>>>,
+        static_gradient_generator: Option<StaticGradientGeneratorFn>,
     ) -> Self {
         let grid_matrix = DMatrix::zeros(height as usize, width as usize);
         let mut static_gradient_matrix = None;
@@ -171,6 +173,10 @@ impl Pheromones {
 
     pub fn disable_dynamic_gradient(&mut self) {
         self.enable_dynamic_gradient = false;
+    }
+
+    pub fn get_current_grid(&self) -> &DMatrix<f32> {
+        self.grid.a()
     }
 }
 

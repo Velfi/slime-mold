@@ -17,8 +17,6 @@ pub enum SlimeError {
     #[cfg(feature = "midi")]
     #[error("The MIDI port you have selected '{0}' is invalid")]
     InvalidMidiPortSelected(String),
-    #[error("Pixels encountered an issue: {0}")]
-    Pixels(#[from] pixels::Error),
     #[error("{0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]

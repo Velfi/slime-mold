@@ -126,30 +126,26 @@ impl Agent {
         trace!("set agent's speed to {}", self.move_speed);
     }
 
-    // TODO why don't they fear the edges?
     pub fn sense(&self, pheromones: &Pheromones, boundary_rect: &Rect<u32>) -> SensorReading {
-        let mut sensor_l_location = self.location;
-        move_in_direction_of_heading(
-            &mut sensor_l_location,
-            rotate_by_degrees(self.heading, -self.sensor_angle),
-            self.sensor_distance,
-            1.0,
-            boundary_rect,
-        );
-        let mut sensor_c_location = self.location;
-        move_in_direction_of_heading(
-            &mut sensor_c_location,
+        let sensor_l_loc_wrapped = calculate_wrapped_sensor_location(
+            self.location,
             self.heading,
+            -self.sensor_angle,
             self.sensor_distance,
-            1.0,
             boundary_rect,
         );
-        let mut sensor_r_location = self.location;
-        move_in_direction_of_heading(
-            &mut sensor_r_location,
-            rotate_by_degrees(self.heading, self.sensor_angle),
+        let sensor_c_loc_wrapped = calculate_wrapped_sensor_location(
+            self.location,
+            self.heading,
+            0.0, // Center sensor is straight ahead
             self.sensor_distance,
-            1.0,
+            boundary_rect,
+        );
+        let sensor_r_loc_wrapped = calculate_wrapped_sensor_location(
+            self.location,
+            self.heading,
+            self.sensor_angle,
+            self.sensor_distance,
             boundary_rect,
         );
 
@@ -157,11 +153,10 @@ impl Agent {
         // movement space in a grid, and the pheromone field. What if we want to have agents moving
         // around and storing that at one level of detail and save the pheromone field at another level
         // of detail?
-        // Also, if a sensor goes out of bounds, it reads -1
-        // Maybe it'd be better to wrap the agents (and their sensors) to the other side of the field?
-        let sensor_l_reading = pheromones.get_reading(sensor_l_location).unwrap_or(0);
-        let sensor_c_reading = pheromones.get_reading(sensor_c_location).unwrap_or(0);
-        let sensor_r_reading = pheromones.get_reading(sensor_r_location).unwrap_or(0);
+        // With wrapping, sensors should now always read from within the pheromone grid.
+        let sensor_l_reading = pheromones.get_reading(sensor_l_loc_wrapped).unwrap_or(0);
+        let sensor_c_reading = pheromones.get_reading(sensor_c_loc_wrapped).unwrap_or(0);
+        let sensor_r_reading = pheromones.get_reading(sensor_r_loc_wrapped).unwrap_or(0);
 
         (sensor_l_reading, sensor_c_reading, sensor_r_reading)
     }
@@ -225,6 +220,35 @@ fn rotate_by_degrees<T: Float>(n: T, rotation_in_degrees: T) -> T {
     }
 
     rotated_n
+}
+
+fn calculate_wrapped_sensor_location(
+    agent_location: Point2,
+    agent_heading: f32,
+    sensor_relative_angle: f32, // 0 for center, -angle for left, +angle for right
+    sensor_distance: f32,
+    boundary_rect: &Rect<u32>,
+) -> Point2 {
+    let sensor_abs_heading = rotate_by_degrees(agent_heading, sensor_relative_angle);
+    let sensor_abs_heading_rad = sensor_abs_heading.to_radians();
+
+    let world_width = boundary_rect.x_max() as f32;
+    let world_height = boundary_rect.y_max() as f32;
+
+    // Calculate unclamped sensor position
+    let unclamped_x = agent_location.x + sensor_distance * sensor_abs_heading_rad.sin();
+    let unclamped_y = agent_location.y + sensor_distance * sensor_abs_heading_rad.cos();
+
+    // Wrap coordinates
+    // The modulo operator % in Rust behaves like a remainder, so for negative numbers,
+    // we add world_width/height before the second modulo to ensure a positive result.
+    let wrapped_x = (unclamped_x % world_width + world_width) % world_width;
+    let wrapped_y = (unclamped_y % world_height + world_height) % world_height;
+
+    Point2 {
+        x: wrapped_x,
+        y: wrapped_y,
+    }
 }
 
 pub fn move_in_direction_of_heading(
