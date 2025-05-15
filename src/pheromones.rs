@@ -11,7 +11,7 @@ pub struct Pheromones {
     static_gradient: Option<GrayImage>,
     enable_static_gradient: bool,
     enable_dynamic_gradient: bool,
-    decay_factor: u8,
+    decay_factor: f32,
     _deposit_size: f32,
     _diffuse_size: f32,
     height: u32,
@@ -22,7 +22,7 @@ impl Pheromones {
     pub fn new(
         width: u32,
         height: u32,
-        decay_factor: u8,
+        decay_factor: f32,
         enable_dynamic_gradient: bool,
         static_gradient_generator: Option<Box<dyn Fn(u32, u32) -> GrayImage>>,
     ) -> Self {
@@ -112,7 +112,7 @@ impl Pheromones {
                 .mut_a()
                 .get_pixel_mut(location_to_deposit.x as u32, location_to_deposit.y as u32);
 
-            *grid_ref = [agent.deposition_amount()].into();
+            *grid_ref = [(agent.deposition_amount() * 255.0).round() as u8].into();
         } else {
             trace!("agent out of bounds at ({})", location_to_deposit)
         }
@@ -127,11 +127,11 @@ impl Pheromones {
     pub fn decay(&mut self) {
         let decay_factor = self.decay_factor;
         self.grid.mut_a().iter_mut().for_each(|pheromone_reading| {
-            *pheromone_reading = pheromone_reading.saturating_sub(decay_factor)
+            *pheromone_reading = (*pheromone_reading as f32 * (1.0 - decay_factor)).round() as u8;
         })
     }
 
-    pub fn set_decay_factor(&mut self, decay_factor: u8) {
+    pub fn set_decay_factor(&mut self, decay_factor: f32) {
         self.decay_factor = decay_factor;
     }
 

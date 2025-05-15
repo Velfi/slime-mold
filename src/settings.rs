@@ -16,46 +16,46 @@ pub const AGENT_SPEED_MIN: f32 = 0.5 + 20.0;
 pub const AGENT_SPEED_MAX: f32 = 1.2 + 20.0;
 pub const AGENT_TURN_SPEED: f32 = 20.0;
 pub const AGENT_POSSIBLE_STARTING_HEADINGS: std::ops::Range<f32> = 0.0..360.0;
-pub const DEPOSITION_AMOUNT: u8 = u8::MAX;
+pub const DEPOSITION_AMOUNT: f32 = 1.0;
 
 // Pheromone settings
 /// Represents the rate at which pheromone signals disappear. A typical decay factor is 1/100 the rate of deposition
-pub const DECAY_FACTOR: u8 = u8::MIN;
+pub const DECAY_FACTOR: f32 = 0.01;
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
-    pub window_width: u32,
-    pub window_height: u32,
-    pub window_fullscreen: bool,
-    pub agent_count: usize,
     pub agent_count_maximum: usize,
+    pub agent_count: usize,
+    pub agent_deposition_amount: f32,
     pub agent_jitter: f32,
-    pub agent_speed_min: f32,
-    pub agent_speed_max: f32,
-    pub agent_turn_speed: f32,
     pub agent_possible_starting_headings: Range<f32>,
-    pub agent_deposition_amount: u8,
-    pub pheromone_decay_factor: u8,
+    pub agent_speed_max: f32,
+    pub agent_speed_min: f32,
+    pub agent_turn_speed: f32,
+    pub pheromone_decay_factor: f32,
     pub pheromone_enable_dynamic_gradient: bool,
+    pub window_fullscreen: bool,
+    pub window_height: u32,
+    pub window_width: u32,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            window_width: WIDTH,
-            window_height: HEIGHT,
-            window_fullscreen: IS_FULLSCREEN,
-            agent_count: AGENT_COUNT,
             agent_count_maximum: AGENT_COUNT_MAXIMUM,
-            agent_jitter: AGENT_JITTER,
-            agent_speed_min: AGENT_SPEED_MIN,
-            agent_speed_max: AGENT_SPEED_MAX,
-            agent_turn_speed: AGENT_TURN_SPEED,
-            agent_possible_starting_headings: AGENT_POSSIBLE_STARTING_HEADINGS,
+            agent_count: AGENT_COUNT,
             agent_deposition_amount: DEPOSITION_AMOUNT,
+            agent_jitter: AGENT_JITTER,
+            agent_possible_starting_headings: AGENT_POSSIBLE_STARTING_HEADINGS,
+            agent_speed_max: AGENT_SPEED_MAX,
+            agent_speed_min: AGENT_SPEED_MIN,
+            agent_turn_speed: AGENT_TURN_SPEED,
             pheromone_decay_factor: DECAY_FACTOR,
             pheromone_enable_dynamic_gradient: true,
+            window_fullscreen: IS_FULLSCREEN,
+            window_height: HEIGHT,
+            window_width: WIDTH,
         }
     }
 }

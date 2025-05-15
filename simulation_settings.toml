@@ -18,8 +18,8 @@ agentSpeedMax = 20.0
 agentTurnSpeed = 10.0
 
 # Pheromone settings
-agentDepositionAmount = 255
-pheromoneDecayFactor = 2
+agentDepositionAmount = 1.0
+pheromoneDecayFactor = 0.01
 pheromoneEnableDynamicGradient = true
 
 [agentPossibleStartingHeadings]

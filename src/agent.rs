@@ -32,7 +32,7 @@ pub struct Agent {
     jitter: f32,
     #[builder(default = default_rng())]
     rng: StdRng,
-    deposition_amount: u8,
+    deposition_amount: f32,
 }
 
 #[derive(Default)]
@@ -44,7 +44,7 @@ pub struct AgentUpdate {
     pub move_speed: Option<f32>,
     pub rotation_speed: Option<f32>,
     pub jitter: Option<f32>,
-    pub deposition_amount: Option<u8>,
+    pub deposition_amount: Option<f32>,
 }
 
 impl Agent {
@@ -117,7 +117,7 @@ impl Agent {
         self.location
     }
 
-    pub fn deposition_amount(&self) -> u8 {
+    pub fn deposition_amount(&self) -> f32 {
         self.deposition_amount
     }
 
