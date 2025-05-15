@@ -20,11 +20,13 @@ pub struct World {
     black_and_white_mode: bool,
     settings: Settings,
     boundary_rect: Rect<u32>,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
 }
 
 impl World {
     /// Create a new `World` instance that can draw a moving box.
-    pub fn new(settings: Settings) -> Self {
+    pub fn new(settings: Settings, device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
         info!("generating {} agents", settings.agent_count);
         info!(
             r#"
@@ -59,6 +61,8 @@ ENABLE_DYN_GRAD	{:?}
             settings.pheromone_decay_factor,
             settings.pheromone_enable_dynamic_gradient,
             None,
+            Arc::clone(&device),
+            Arc::clone(&queue),
         )));
 
         let gradient = Arc::new(Box::new(viridis()) as Box<dyn colorgrad::Gradient + Sync + Send>);
@@ -73,6 +77,8 @@ ENABLE_DYN_GRAD	{:?}
             pheromones,
             black_and_white_mode: true,
             settings,
+            device,
+            queue,
         }
     }
 
@@ -88,15 +94,15 @@ ENABLE_DYN_GRAD	{:?}
         self.settings.window_width = width;
         self.settings.window_height = height;
         self.boundary_rect = Rect::new(0, 0, width, height);
-        // Recreate pheromones with new dimensions
-        // Assuming Pheromones::new takes width, height, decay_factor, enable_dynamic_gradient, and an optional static_gradient_generator
-        // We need to decide how to handle the static_gradient_generator on resize. For now, passing None.
+
         self.pheromones = Arc::new(RwLock::new(Pheromones::new(
             width,
             height,
             self.settings.pheromone_decay_factor,
             self.settings.pheromone_enable_dynamic_gradient,
-            None, // Or handle static gradient regeneration if needed
+            None,
+            Arc::clone(&self.device),
+            Arc::clone(&self.queue),
         )));
         info!("World resized to {}x{}", width, height);
     }

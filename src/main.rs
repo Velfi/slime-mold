@@ -91,6 +91,10 @@ async fn run(event_loop: EventLoop<()>, window: Arc<Window>, initial_settings: S
         .await
         .unwrap();
 
+    // Wrap device and queue in Arc for sharing
+    let device = Arc::new(device);
+    let queue = Arc::new(queue);
+
     let surface_caps = surface.get_capabilities(&adapter);
     let surface_format = surface_caps
         .formats
@@ -250,7 +254,10 @@ async fn run(event_loop: EventLoop<()>, window: Arc<Window>, initial_settings: S
     #[cfg(feature = "midi")]
     midi_interface.open().expect("Midi interface open failed");
 
-    let mut world = World::new(current_settings); // Pass the cloned settings
+    let _last_log_time = Instant::now();
+    let _frame_times: CircularQueue<f32> = CircularQueue::with_capacity(60);
+
+    let mut world = World::new(current_settings, Arc::clone(&device), Arc::clone(&queue));
 
     let mut frame_time = 0.16;
     let mut time_of_last_frame_start = Instant::now();

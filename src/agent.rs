@@ -7,7 +7,7 @@ use rand::prelude::*;
 use rand::rngs::StdRng;
 use typed_builder::TypedBuilder;
 
-pub type SensorReading = (i32, i32, i32);
+pub type SensorReading = (f32, f32, f32);
 
 #[derive(TypedBuilder)]
 pub struct Agent {
@@ -154,9 +154,9 @@ impl Agent {
         // around and storing that at one level of detail and save the pheromone field at another level
         // of detail?
         // With wrapping, sensors should now always read from within the pheromone grid.
-        let sensor_l_reading = pheromones.get_reading(sensor_l_loc_wrapped).unwrap_or(0);
-        let sensor_c_reading = pheromones.get_reading(sensor_c_loc_wrapped).unwrap_or(0);
-        let sensor_r_reading = pheromones.get_reading(sensor_r_loc_wrapped).unwrap_or(0);
+        let sensor_l_reading = pheromones.get_reading(sensor_l_loc_wrapped).unwrap_or(0) as f32;
+        let sensor_c_reading = pheromones.get_reading(sensor_c_loc_wrapped).unwrap_or(0) as f32;
+        let sensor_r_reading = pheromones.get_reading(sensor_r_loc_wrapped).unwrap_or(0) as f32;
 
         (sensor_l_reading, sensor_c_reading, sensor_r_reading)
     }
