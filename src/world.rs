@@ -1,9 +1,9 @@
 use crate::{
-    DEFAULT_SETTINGS_FILE,
     agent::{Agent, AgentUpdate},
     errors::SlimeError,
     pheromones::Pheromones,
     rect::Rect,
+    settings::DEFAULT_SETTINGS_FILE,
     settings::Settings,
 };
 use log::{error, info};

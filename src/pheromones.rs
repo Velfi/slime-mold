@@ -1,9 +1,11 @@
-use crate::{Agent, Point2};
 use log::debug;
 use nalgebra::DMatrix;
 use std::borrow::Cow;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
+
+use crate::agent::Agent;
+use crate::point2::Point2;
 
 pub type StaticGradientGeneratorFn = Box<dyn Fn(u32, u32) -> Vec<f32>>;
 

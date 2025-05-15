@@ -1,4 +1,4 @@
-use crate::Point2;
+use crate::point2::Point2;
 use std::ops::Add;
 
 /// A Rectangle defined by its top left corner, width and height.

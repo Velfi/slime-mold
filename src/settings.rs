@@ -21,6 +21,7 @@ pub const DEPOSITION_AMOUNT: f32 = 1.0;
 // Pheromone settings
 /// Represents the rate at which pheromone signals disappear. A typical decay factor is 1/100 the rate of deposition
 pub const DECAY_FACTOR: f32 = 0.01;
+pub const DEFAULT_SETTINGS_FILE: &str = "simulation_settings.toml";
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]

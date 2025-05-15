@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crate::{Point2, pheromones::Pheromones, rect::Rect, settings::Settings};
+use crate::{pheromones::Pheromones, point2::Point2, rect::Rect, settings::Settings};
 use log::trace;
 use num::{Float, NumCast};
 use rand::prelude::*;
@@ -9,30 +9,30 @@ use typed_builder::TypedBuilder;
 
 pub type SensorReading = (f32, f32, f32);
 
-#[derive(TypedBuilder)]
+#[derive(TypedBuilder, Clone)]
 pub struct Agent {
-    location: Point2,
+    pub location: Point2,
     // The heading an agent is facing. (In degrees)
     #[builder(default)]
-    heading: f32,
+    pub heading: f32,
     // There are three sensors per agent: A center sensor, a left sensor, and a right sensor. The side sensors are positioned based on this angle. (In degrees)
     #[builder(default = 45.0f32)]
-    sensor_angle: f32,
+    pub sensor_angle: f32,
     // How far out a sensor is from the agent
     #[builder(default = 9.0f32)]
-    sensor_distance: f32,
+    pub sensor_distance: f32,
     // How far out a sensor is from the agent
     #[builder(default = 1.0f32)]
-    move_speed: f32,
+    pub move_speed: f32,
     // How quickly the agent can rotate
     #[builder(default = 20.0f32)]
-    rotation_speed: f32,
+    pub rotation_speed: f32,
     // The tendency of agents to move erratically
     #[builder(default = 0.0f32)]
-    jitter: f32,
+    pub jitter: f32,
     #[builder(default = default_rng())]
-    rng: StdRng,
-    deposition_amount: f32,
+    pub rng: StdRng,
+    pub deposition_amount: f32,
 }
 
 #[derive(Default)]

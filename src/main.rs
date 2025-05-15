@@ -1,15 +1,3 @@
-mod agent;
-mod errors;
-#[cfg(feature = "midi")]
-mod midi;
-mod pheromones;
-mod point2;
-mod rect;
-mod settings;
-mod swapper;
-mod world;
-
-pub use agent::Agent;
 use circular_queue::CircularQueue;
 use log::{error, info, trace};
 #[cfg(feature = "midi")]
@@ -21,14 +9,16 @@ use notify::INotifyWatcher;
 #[cfg(target_os = "windows")]
 use notify::ReadDirectoryChangesWatcher;
 use notify::{Error as NotifyError, Event as NotifyEvent, RecursiveMode, Watcher};
-pub use point2::Point2;
-use settings::Settings;
+pub use slime::agent::Agent;
+pub use slime::point2::Point2;
+use slime::settings::{DEFAULT_SETTINGS_FILE, Settings};
+pub use slime::swapper::Swapper;
+use slime::world::World;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
-pub use swapper::Swapper;
 use winit::{
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop, EventLoopWindowTarget},
@@ -36,9 +26,6 @@ use winit::{
     window::Window,
 };
 use winit_input_helper::WinitInputHelper;
-use world::World;
-
-pub const DEFAULT_SETTINGS_FILE: &str = "simulation_settings.toml";
 
 #[cfg(target_os = "macos")]
 pub type SettingsWatcherComponents = (Receiver<Result<NotifyEvent, NotifyError>>, FsEventWatcher);
