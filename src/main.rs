@@ -9,11 +9,11 @@ use notify::INotifyWatcher;
 #[cfg(target_os = "windows")]
 use notify::ReadDirectoryChangesWatcher;
 use notify::{Error as NotifyError, Event as NotifyEvent, RecursiveMode, Watcher};
-pub use slime::agent::Agent;
 pub use slime::point2::Point2;
 use slime::settings::{DEFAULT_SETTINGS_FILE, Settings};
+pub use slime::simulation::Agent;
+pub use slime::simulation::World;
 pub use slime::swapper::Swapper;
-use slime::world::World;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;

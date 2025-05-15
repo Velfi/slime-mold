@@ -1,11 +1,400 @@
+use crate::errors::SlimeError;
+use crate::settings::DEFAULT_SETTINGS_FILE;
+use crate::{point2::Point2, rect::Rect, settings::Settings};
 use log::debug;
+use log::error;
+use log::info;
+use log::trace;
 use nalgebra::DMatrix;
+use num::{Float, NumCast};
+use rand::prelude::*;
+use rand::rngs::StdRng;
+use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 use std::borrow::Cow;
+use std::fs;
+use std::ops::Range;
 use std::sync::Arc;
+use std::sync::RwLock;
+use typed_builder::TypedBuilder;
 use wgpu::util::DeviceExt;
 
-use crate::agent::Agent;
-use crate::point2::Point2;
+pub type SensorReading = (f32, f32, f32);
+
+#[derive(TypedBuilder, Clone)]
+pub struct Agent {
+    pub location: Point2,
+    // The heading an agent is facing. (In degrees)
+    #[builder(default)]
+    pub heading: f32,
+    // There are three sensors per agent: A center sensor, a left sensor, and a right sensor. The side sensors are positioned based on this angle. (In degrees)
+    #[builder(default = 45.0f32)]
+    pub sensor_angle: f32,
+    // How far out a sensor is from the agent
+    #[builder(default = 9.0f32)]
+    pub sensor_distance: f32,
+    // How far out a sensor is from the agent
+    #[builder(default = 1.0f32)]
+    pub move_speed: f32,
+    // How quickly the agent can rotate
+    #[builder(default = 20.0f32)]
+    pub rotation_speed: f32,
+    // The tendency of agents to move erratically
+    #[builder(default = 0.0f32)]
+    pub jitter: f32,
+    #[builder(default = default_rng())]
+    pub rng: StdRng,
+    pub deposition_amount: f32,
+}
+
+#[derive(Default)]
+pub struct AgentUpdate {
+    pub location: Option<Point2>,
+    pub heading: Option<f32>,
+    pub sensor_angle: Option<f32>,
+    pub sensor_distance: Option<f32>,
+    pub move_speed: Option<f32>,
+    pub rotation_speed: Option<f32>,
+    pub jitter: Option<f32>,
+    pub deposition_amount: Option<f32>,
+}
+
+impl Agent {
+    pub fn new_from_settings(settings: &Settings) -> Self {
+        let mut rng: StdRng = StdRng::from_os_rng();
+        let deposition_amount = settings.agent_deposition_amount;
+        let move_speed = rng.random_range(settings.agent_speed_min..settings.agent_speed_max);
+        let location = Point2::new(
+            rng.random_range(0.0..(settings.window_width as f32)),
+            rng.random_range(0.0..(settings.window_height as f32)),
+        );
+        let heading = rng.random_range(settings.agent_possible_starting_headings.clone());
+
+        Agent::builder()
+            .location(location)
+            .heading(heading)
+            .move_speed(move_speed)
+            .jitter(settings.agent_jitter)
+            .deposition_amount(deposition_amount)
+            .rotation_speed(settings.agent_turn_speed)
+            .rng(StdRng::from_os_rng())
+            .build()
+    }
+
+    pub fn update(&mut self, pheromones: &Pheromones, delta_t: f32, boundary_rect: &Rect<u32>) {
+        let sensory_input = self.sense(pheromones, boundary_rect);
+        let rotation_towards_sensory_input = self.judge_sensory_input(sensory_input);
+        self.rotate(rotation_towards_sensory_input);
+
+        move_in_direction_of_heading(
+            &mut self.location,
+            self.heading,
+            self.move_speed,
+            delta_t,
+            boundary_rect,
+        );
+    }
+
+    pub fn judge_sensory_input(&mut self, (l_reading, c_reading, r_reading): SensorReading) -> f32 {
+        if c_reading > l_reading && c_reading > r_reading {
+            // do nothing, stay facing same direction
+            trace!("Agent's center value is greatest, doing nothing");
+            0.0
+        } else if c_reading < l_reading && c_reading < r_reading {
+            // rotate randomly to the left or right
+            let should_rotate_right: bool = self.rng.random();
+
+            if should_rotate_right {
+                trace!("Agent is rotating randomly to the right");
+                self.rotation_speed
+            } else {
+                trace!("Agent is rotating randomly to the left");
+                -self.rotation_speed
+            }
+        } else if l_reading < r_reading {
+            // rotate right
+            trace!("Agent is rotating right");
+            self.rotation_speed
+        } else if r_reading < l_reading {
+            // rotate left
+            trace!("Agent is rotating left");
+            -self.rotation_speed
+        } else {
+            trace!("Agent is doing nothing (final fallthrough case)");
+            0.0
+        }
+    }
+
+    pub fn location(&self) -> Point2 {
+        self.location
+    }
+
+    pub fn deposition_amount(&self) -> f32 {
+        self.deposition_amount
+    }
+
+    pub fn set_new_random_move_speed_in_range(&mut self, move_speed_range: Range<f32>) {
+        self.move_speed = self.rng.random_range(move_speed_range);
+        trace!("set agent's speed to {}", self.move_speed);
+    }
+
+    pub fn sense(&self, pheromones: &Pheromones, boundary_rect: &Rect<u32>) -> SensorReading {
+        let sensor_l_loc_wrapped = calculate_wrapped_sensor_location(
+            self.location,
+            self.heading,
+            -self.sensor_angle,
+            self.sensor_distance,
+            boundary_rect,
+        );
+        let sensor_c_loc_wrapped = calculate_wrapped_sensor_location(
+            self.location,
+            self.heading,
+            0.0, // Center sensor is straight ahead
+            self.sensor_distance,
+            boundary_rect,
+        );
+        let sensor_r_loc_wrapped = calculate_wrapped_sensor_location(
+            self.location,
+            self.heading,
+            self.sensor_angle,
+            self.sensor_distance,
+            boundary_rect,
+        );
+
+        // This assumes that there is a 1:1 relationship between an agent's possible
+        // movement space in a grid, and the pheromone field. What if we want to have agents moving
+        // around and storing that at one level of detail and save the pheromone field at another level
+        // of detail?
+        // With wrapping, sensors should now always read from within the pheromone grid.
+        let sensor_l_reading = pheromones.get_reading(sensor_l_loc_wrapped).unwrap_or(0) as f32;
+        let sensor_c_reading = pheromones.get_reading(sensor_c_loc_wrapped).unwrap_or(0) as f32;
+        let sensor_r_reading = pheromones.get_reading(sensor_r_loc_wrapped).unwrap_or(0) as f32;
+
+        (sensor_l_reading, sensor_c_reading, sensor_r_reading)
+    }
+
+    pub fn rotate(&mut self, mut rotation_in_degrees: f32) {
+        if self.jitter != 0.0 {
+            let magnitude = if self.rng.random() {
+                self.rng.random::<f32>()
+            } else {
+                self.rng.random::<f32>() * -1.0
+            };
+            // Randomly adjust rotation amount
+            rotation_in_degrees += self.jitter * magnitude;
+        }
+
+        self.heading = rotate_by_degrees(self.heading, rotation_in_degrees);
+        trace!("new heading is {}", self.heading);
+    }
+
+    pub fn apply_update(&mut self, update: &AgentUpdate) {
+        if let Some(val) = update.location {
+            self.location = val;
+        }
+        if let Some(val) = update.heading {
+            self.heading = val;
+        }
+        if let Some(val) = update.sensor_angle {
+            self.sensor_angle = val;
+        }
+        if let Some(val) = update.sensor_distance {
+            self.sensor_distance = val;
+        }
+        if let Some(val) = update.move_speed {
+            self.move_speed = val;
+        }
+        if let Some(val) = update.rotation_speed {
+            self.rotation_speed = val;
+        }
+        if let Some(val) = update.jitter {
+            self.jitter = val;
+        }
+        if let Some(val) = update.deposition_amount {
+            self.deposition_amount = val;
+        }
+    }
+
+    pub fn scale_location(
+        &mut self,
+        old_width: f32,
+        old_height: f32,
+        new_width: f32,
+        new_height: f32,
+    ) {
+        let scale_x = new_width / old_width;
+        let scale_y = new_height / old_height;
+        self.location.x *= scale_x;
+        self.location.y *= scale_y;
+    }
+}
+
+fn rotate_by_degrees<T: Float>(n: T, rotation_in_degrees: T) -> T {
+    let n_mod = NumCast::from(360.0).unwrap();
+    let zero = NumCast::from(0.0).unwrap();
+    let mut rotated_n = n + rotation_in_degrees;
+
+    loop {
+        if rotated_n > n_mod {
+            rotated_n = rotated_n - n_mod;
+        } else if rotated_n < zero {
+            rotated_n = rotated_n + n_mod;
+        } else {
+            break;
+        }
+    }
+
+    rotated_n
+}
+
+fn calculate_wrapped_sensor_location(
+    agent_location: Point2,
+    agent_heading: f32,
+    sensor_relative_angle: f32, // 0 for center, -angle for left, +angle for right
+    sensor_distance: f32,
+    boundary_rect: &Rect<u32>,
+) -> Point2 {
+    let sensor_abs_heading = rotate_by_degrees(agent_heading, sensor_relative_angle);
+    let sensor_abs_heading_rad = sensor_abs_heading.to_radians();
+
+    let world_width = boundary_rect.x_max() as f32;
+    let world_height = boundary_rect.y_max() as f32;
+
+    // Calculate unclamped sensor position
+    let unclamped_x = agent_location.x + sensor_distance * sensor_abs_heading_rad.sin();
+    let unclamped_y = agent_location.y + sensor_distance * sensor_abs_heading_rad.cos();
+
+    // Wrap coordinates
+    // The modulo operator % in Rust behaves like a remainder, so for negative numbers,
+    // we add world_width/height before the second modulo to ensure a positive result.
+    let wrapped_x = (unclamped_x % world_width + world_width) % world_width;
+    let wrapped_y = (unclamped_y % world_height + world_height) % world_height;
+
+    Point2 {
+        x: wrapped_x,
+        y: wrapped_y,
+    }
+}
+
+pub fn move_in_direction_of_heading(
+    location: &mut Point2,
+    heading: f32,
+    speed: f32,
+    delta_t: f32,
+    boundary_rect: &Rect<u32>,
+) {
+    let heading_in_radians = heading.to_radians();
+
+    move_relative_clamping(
+        location,
+        delta_t * speed * heading_in_radians.sin(),
+        delta_t * speed * heading_in_radians.cos(),
+        boundary_rect,
+    );
+}
+
+#[allow(dead_code)]
+pub fn move_relative_wrapping(xy: &mut Point2, x: f32, y: f32, boundary_rect: &Rect<u32>) {
+    xy.x += x;
+    xy.y += y;
+
+    if xy.x >= boundary_rect.x_max() as f32 {
+        xy.x -= boundary_rect.x_max() as f32;
+    } else if xy.x < boundary_rect.x_min() as f32 {
+        xy.x += boundary_rect.x_max() as f32;
+    }
+
+    if xy.y >= boundary_rect.y_max() as f32 {
+        xy.y -= boundary_rect.y_max() as f32;
+    } else if xy.y < boundary_rect.y_min() as f32 {
+        xy.y += boundary_rect.y_max() as f32;
+    }
+}
+
+pub fn move_relative_clamping(xy: &mut Point2, x: f32, y: f32, boundary_rect: &Rect<u32>) {
+    xy.x += x;
+    xy.y += y;
+
+    if xy.x > boundary_rect.x_max() as f32 {
+        xy.x = boundary_rect.x_max() as f32;
+    } else if xy.x < boundary_rect.x_min() as f32 {
+        xy.x = boundary_rect.x_min() as f32;
+    }
+
+    if xy.y > boundary_rect.y_max() as f32 {
+        xy.y = boundary_rect.y_max() as f32;
+    } else if xy.y < boundary_rect.y_min() as f32 {
+        xy.y = boundary_rect.y_min() as f32;
+    }
+}
+
+fn default_rng() -> StdRng {
+    StdRng::from_os_rng()
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn rotate_by_degrees_handles_clockwise_rotations_correctly() {
+        let rotation_amount = 45.0;
+        let start_rotation = 0.0;
+        let expected_end_rotation = 45.0;
+        let actual_end_rotation = rotate_by_degrees(start_rotation, rotation_amount);
+
+        assert_eq!(expected_end_rotation, actual_end_rotation)
+    }
+
+    #[test]
+    fn rotate_by_degrees_handles_clockwise_rotations_correctly_wrapping() {
+        let rotation_amount = 20.0;
+        let start_rotation = 350.0;
+        let expected_end_rotation = 10.0;
+        let actual_end_rotation = rotate_by_degrees(start_rotation, rotation_amount);
+
+        assert_eq!(expected_end_rotation, actual_end_rotation)
+    }
+
+    #[test]
+    fn rotate_by_degrees_handles_clockwise_rotations_correctly_big_number() {
+        let rotation_amount = 6781350.0;
+        let start_rotation = 350.0;
+        let expected_end_rotation = 20.0;
+        let actual_end_rotation = rotate_by_degrees(start_rotation, rotation_amount);
+
+        assert_eq!(expected_end_rotation, actual_end_rotation)
+    }
+
+    #[test]
+    fn rotate_by_degrees_handles_counterclockwise_rotations_correctly() {
+        let rotation_amount = -45.0;
+        let start_rotation = 0.0;
+        let expected_end_rotation = 315.0;
+        let actual_end_rotation = rotate_by_degrees(start_rotation, rotation_amount);
+
+        assert_eq!(expected_end_rotation, actual_end_rotation)
+    }
+
+    #[test]
+    fn rotate_by_degrees_handles_counterclockwise_rotations_correctly_wrapping() {
+        let rotation_amount = -20.0;
+        let start_rotation = 10.0;
+        let expected_end_rotation = 350.0;
+        let actual_end_rotation = rotate_by_degrees(start_rotation, rotation_amount);
+
+        assert_eq!(expected_end_rotation, actual_end_rotation)
+    }
+
+    #[test]
+    fn rotate_by_degrees_handles_counterclockwise_rotations_correctly_big_number() {
+        let rotation_amount = -13246790.0;
+        let start_rotation = 10.0;
+        let expected_end_rotation = 140.0;
+        let actual_end_rotation = rotate_by_degrees(start_rotation, rotation_amount);
+
+        assert_eq!(expected_end_rotation, actual_end_rotation)
+    }
+}
 
 pub type StaticGradientGeneratorFn = Box<dyn Fn(u32, u32) -> Vec<f32>>;
 
@@ -1169,4 +1558,459 @@ fn box_filter(
         }
     }
     out_data
+}
+
+pub struct World {
+    agents: Vec<Agent>,
+    frame_time: f32,
+    pheromones: Arc<RwLock<Pheromones>>,
+    settings: Settings,
+    boundary_rect: Rect<u32>,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+
+    // New GPU resources for display texture conversion
+    display_texture: wgpu::Texture,
+    display_texture_view: wgpu::TextureView,
+    pheromone_data_buffer: wgpu::Buffer,
+    conversion_pipeline: wgpu::ComputePipeline,
+    conversion_bind_group_layout: wgpu::BindGroupLayout,
+    conversion_bind_group: wgpu::BindGroup,
+}
+
+impl World {
+    /// Create a new `World` instance that can draw a moving box.
+    pub fn new(settings: Settings, device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
+        info!("generating {} agents", settings.agent_count);
+        info!(
+            r#"
+AGENT_COUNT_MAX	{:?}
+AGENT_JITTER	{:?}
+AGENT_SPEED_	{:?}
+AGENT_SPEED_	{:?}
+AGENT_TURN_SPEED	{:?}
+AGENT_POSSIBLE_STRT_HDGS	{:?}
+DEPOSITION_AMOUN	{:?}
+DECAY_FACTOR	{:?}
+ENABLE_DYN_GRAD	{:?}
+"#,
+            settings.agent_count_maximum,
+            settings.agent_jitter,
+            settings.agent_speed_min,
+            settings.agent_speed_max,
+            settings.agent_turn_speed,
+            settings.agent_possible_starting_headings,
+            settings.agent_deposition_amount,
+            settings.pheromone_decay_factor,
+            settings.pheromone_enable_dynamic_gradient,
+        );
+
+        let agents: Vec<_> = (0..settings.agent_count)
+            .map(|_| Agent::new_from_settings(&settings))
+            .collect();
+
+        let pheromones = Arc::new(RwLock::new(Pheromones::new(
+            settings.window_width,
+            settings.window_height,
+            settings.pheromone_decay_factor,
+            settings.pheromone_enable_dynamic_gradient,
+            None,
+            Arc::clone(&device),
+            Arc::clone(&queue),
+        )));
+
+        let boundary_rect = Rect::new(0, 0, settings.window_width, settings.window_height);
+
+        // --- Initialize new GPU resources for display ---
+        let texture_size = wgpu::Extent3d {
+            width: settings.window_width,
+            height: settings.window_height,
+            depth_or_array_layers: 1,
+        };
+
+        let display_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("World Display Texture"),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm, // Shader writes rgba8unorm
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        let display_texture_view =
+            display_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let buffer_size = (settings.window_width
+            * settings.window_height
+            * std::mem::size_of::<f32>() as u32) as wgpu::BufferAddress;
+        let pheromone_data_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Pheromone Data Buffer"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Load and create compute shader and pipeline
+        let shader_source_str = fs::read_to_string("src/shaders/world_convert.wgsl")
+            .expect("Failed to read world_convert.wgsl shader");
+        let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("World Convert Shader Module"),
+            source: wgpu::ShaderSource::Wgsl(shader_source_str.into()),
+        });
+
+        let conversion_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("World Convert Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        // Pheromone values buffer
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None, // Buffer size checked at dispatch
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        // Output texture
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+        let conversion_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("World Convert Pipeline Layout"),
+                bind_group_layouts: &[&conversion_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let conversion_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("World Conversion Compute Pipeline"),
+                layout: Some(&conversion_pipeline_layout),
+                module: &shader_module,
+                entry_point: "main",
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            });
+
+        let conversion_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("World Convert Bind Group"),
+            layout: &conversion_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: pheromone_data_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&display_texture_view),
+                },
+            ],
+        });
+
+        Self {
+            agents,
+            boundary_rect,
+            frame_time: 0.0,
+            pheromones,
+            settings,
+            device,
+            queue,
+            display_texture,
+            display_texture_view,
+            pheromone_data_buffer,
+            conversion_pipeline,
+            conversion_bind_group_layout,
+            conversion_bind_group,
+        }
+    }
+
+    pub fn window_width(&self) -> u32 {
+        self.settings.window_width
+    }
+
+    pub fn window_height(&self) -> u32 {
+        self.settings.window_height
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        let old_width = self.settings.window_width as f32;
+        let old_height = self.settings.window_height as f32;
+        let new_width = width as f32;
+        let new_height = height as f32;
+
+        self.settings.window_width = width;
+        self.settings.window_height = height;
+        self.boundary_rect = Rect::new(0, 0, width, height);
+
+        // Scale agent locations
+        for agent in self.agents.iter_mut() {
+            agent.scale_location(old_width, old_height, new_width, new_height);
+        }
+
+        self.pheromones = Arc::new(RwLock::new(Pheromones::new(
+            width,
+            height,
+            self.settings.pheromone_decay_factor,
+            self.settings.pheromone_enable_dynamic_gradient,
+            None,
+            Arc::clone(&self.device),
+            Arc::clone(&self.queue),
+        )));
+        info!("World resized pheromones to {}x{}", width, height);
+
+        // --- Recreate GPU resources for display ---
+        let texture_size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+
+        self.display_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("World Display Texture"),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        self.display_texture_view = self
+            .display_texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let buffer_size =
+            (width * height * std::mem::size_of::<f32>() as u32) as wgpu::BufferAddress;
+        self.pheromone_data_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Pheromone Data Buffer (Resized)"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Recreate bind group with new buffer and texture view
+        self.conversion_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("World Convert Bind Group (Resized)"),
+            layout: &self.conversion_bind_group_layout, // Layout is reused
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.pheromone_data_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.display_texture_view),
+                },
+            ],
+        });
+        info!("World display resources resized to {}x{}", width, height);
+    }
+
+    pub fn reload_settings(&mut self) -> Result<(), SlimeError> {
+        let new_settings = Settings::load_from_file(DEFAULT_SETTINGS_FILE)?;
+        let agent_settings_changed = self.settings.did_agent_settings_change(&new_settings);
+        let pheromone_settings_changed = self.settings.did_pheromone_settings_change(&new_settings);
+        self.settings = new_settings;
+
+        if agent_settings_changed {
+            info!("agent settings have changed, running an update...");
+            if let Err(e) = self.refresh_agents_from_settings() {
+                error!(
+                    "failed to update agents after a settings change with error: {}",
+                    e
+                );
+            }
+        }
+
+        if pheromone_settings_changed {
+            info!("pheromone settings have changed, running an update...");
+            if let Err(e) = self.refresh_pheromones_from_settings() {
+                error!(
+                    "failed to update pheromones after a settings change with error: {}",
+                    e
+                );
+            }
+        }
+
+        if self.agents.len() < self.settings.agent_count {
+            (self.agents.len()..self.settings.agent_count)
+                .for_each(|_| self.agents.push(Agent::new_from_settings(&self.settings)));
+        }
+
+        Ok(())
+    }
+
+    pub fn set_frame_time(&mut self, frame_time: f32) {
+        self.frame_time = frame_time;
+    }
+
+    pub fn toggle_dynamic_gradient(&mut self) {
+        self.settings.pheromone_enable_dynamic_gradient =
+            !self.settings.pheromone_enable_dynamic_gradient;
+
+        let _ = self.refresh_pheromones_from_settings();
+    }
+
+    fn refresh_agents_from_settings(&mut self) -> Result<(), SlimeError> {
+        let agent_update = AgentUpdate {
+            jitter: Some(self.settings.agent_jitter),
+            rotation_speed: Some(self.settings.agent_turn_speed),
+            deposition_amount: Some(self.settings.agent_deposition_amount),
+            ..Default::default()
+        };
+
+        let move_speed_range = self.settings.agent_speed_min..self.settings.agent_speed_max;
+
+        self.agents.iter_mut().for_each(|agent| {
+            agent.apply_update(&agent_update);
+            agent.set_new_random_move_speed_in_range(move_speed_range.clone());
+        });
+
+        Ok(())
+    }
+
+    fn refresh_pheromones_from_settings(&mut self) -> Result<(), SlimeError> {
+        let mut pheromones = self
+            .pheromones
+            .write()
+            .map_err(|e| SlimeError::ThreadSafety(e.to_string()))?;
+
+        if self.settings.pheromone_enable_dynamic_gradient {
+            pheromones.enable_dynamic_gradient();
+        } else {
+            pheromones.disable_dynamic_gradient();
+        }
+
+        pheromones.set_decay_factor(self.settings.pheromone_decay_factor);
+
+        Ok(())
+    }
+
+    /// Update the `World` internal state; bounce the box around the screen.
+    pub fn update(&mut self) {
+        let boundary_rect = &self.boundary_rect;
+        let pheromones_read_lock = &self.pheromones;
+        let agents = &mut self.agents;
+        let delta_t = self.frame_time;
+
+        // Agents sense the environment (using CPU cache of pheromones from end of *previous* frame)
+        // and decide on their next action.
+        agents.par_iter_mut().for_each(|agent| {
+            let pheromones_guard = pheromones_read_lock
+                .read()
+                .expect("reading pheromones during agent update");
+            // Agent::update now uses pheromones_guard.get_reading(), which reads from CPU cache
+            agent.update(&pheromones_guard, delta_t, boundary_rect)
+        });
+
+        // Now, update the pheromone maps based on agent actions from this frame
+        // and other pheromone dynamics (diffuse, decay).
+        // These operations work on the GPU textures.
+        let mut pheromones_write_guard = self
+            .pheromones
+            .write()
+            .expect("couldn't get write lock on pheromones for update steps");
+
+        // Deposit step (GPU)
+        pheromones_write_guard.deposit(agents); // Pass current state of agents for deposition
+
+        // Diffuse step (currently GPU placeholder - copies texture)
+        pheromones_write_guard.diffuse();
+
+        // Decay step (GPU)
+        pheromones_write_guard.decay();
+
+        // CRITICAL: After all GPU pheromone operations for the current frame are done,
+        // update the CPU read cache with the latest pheromone state.
+        // This cache will be used by agents in the *next* frame's sensing phase.
+        pheromones_write_guard.update_cpu_read_cache();
+
+        // Drop the write guard before calling update_display_texture,
+        // as update_display_texture needs a read guard.
+        drop(pheromones_write_guard);
+
+        // New step: update our owned display texture using GPU
+        self.update_display_texture();
+
+        // Agent population control (remains the same)
+        if self.agents.len() > self.settings.agent_count_maximum {
+            self.agents.truncate(self.settings.agent_count_maximum)
+        }
+    }
+
+    /// Updates the internal display_texture using a compute shader.
+    /// This replaces the CPU-bound logic of the old `draw` method.
+    pub fn update_display_texture(&self) {
+        let pheromones_guard = self
+            .pheromones
+            .read()
+            .expect("couldn't get lock on pheromones for display texture update");
+
+        let pheromones_row_major = pheromones_guard.read_current_texture_to_vec();
+
+        if pheromones_row_major.is_empty() {
+            error!("Pheromone data is empty. Skipping display texture update.");
+            return;
+        }
+
+        // Ensure buffer has correct size for the data.
+        // This should be guaranteed by resize logic, but a check might be good for safety.
+        let expected_buffer_elements = self.settings.window_width * self.settings.window_height;
+        if pheromones_row_major.len() != expected_buffer_elements as usize {
+            error!(
+                "Pheromone data size mismatch for display update. Expected {}, got {}. Skipping update.",
+                expected_buffer_elements,
+                pheromones_row_major.len()
+            );
+            return;
+        }
+
+        // Write pheromone data to GPU buffer
+        self.queue.write_buffer(
+            &self.pheromone_data_buffer,
+            0,
+            bytemuck::cast_slice(&pheromones_row_major),
+        );
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("World Display Texture Update Encoder"),
+            });
+
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("World Pheromone to RGBA Compute Pass"),
+                timestamp_writes: None,
+            });
+            compute_pass.set_pipeline(&self.conversion_pipeline);
+            compute_pass.set_bind_group(0, &self.conversion_bind_group, &[]);
+            // Dispatch based on texture size; workgroup size is 8x8 in shader
+            let workgroup_size_x = 8;
+            let workgroup_size_y = 8;
+            compute_pass.dispatch_workgroups(
+                self.settings.window_width.div_ceil(workgroup_size_x), // Ceil division
+                self.settings.window_height.div_ceil(workgroup_size_y), // Ceil division
+                1,
+            );
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Provides a view to the GPU-managed texture that holds the visual representation of pheromones.
+    pub fn get_display_texture_view(&self) -> &wgpu::TextureView {
+        &self.display_texture_view
+    }
 }
