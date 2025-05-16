@@ -114,7 +114,7 @@ fn reassign_agent_speeds(
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("Agent Copy Encoder"),
     });
-    encoder.copy_buffer_to_buffer(&agent_buffer, 0, &temp_agent_buffer, 0, agent_buf_size);
+    encoder.copy_buffer_to_buffer(agent_buffer, 0, &temp_agent_buffer, 0, agent_buf_size);
     queue.submit(Some(encoder.finish()));
 
     // Map and read
@@ -190,8 +190,10 @@ fn main() {
     let mut a_pressed = false;
     // Track D key state for sensor distance
     let mut d_pressed = false;
-    // Track F key state for deposition amount
+    // Track F key state for LUT reversal
     let mut f_pressed = false;
+    // Track R key state for deposition amount
+    let mut r_pressed = false;
     // Track V key state for decay factor
     let mut v_pressed = false;
     // Track B key state for diffusion rate
@@ -200,8 +202,6 @@ fn main() {
     let mut n_pressed = false;
     // Track P key state to prevent holding
     let mut p_pressed = false;
-    // Track R key state for LUT reversal
-    let mut r_pressed = false;
     // Track if LUT is currently reversed
     let mut lut_reversed = false;
 
@@ -544,6 +544,21 @@ fn main() {
                             event:
                                 winit::event::KeyEvent {
                                     state,
+                                    physical_key: PhysicalKey::Code(KeyCode::KeyR),
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => {
+                    r_pressed = state == ElementState::Pressed;
+                }
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::KeyboardInput {
+                            event:
+                                winit::event::KeyEvent {
+                                    state,
                                     physical_key: PhysicalKey::Code(KeyCode::KeyV),
                                     ..
                                 },
@@ -869,7 +884,7 @@ fn main() {
                             }
                             _ => {}
                         }
-                    } else if f_pressed {
+                    } else if r_pressed {
                         match physical_key {
                             PhysicalKey::Code(KeyCode::ArrowUp) => {
                                 let increment = if shift_pressed { 0.1 } else { 1.0 };
@@ -897,6 +912,41 @@ fn main() {
                                     physical_height,
                                     decay_factor,
                                 );
+                            }
+                            _ => {}
+                        }
+                    } else if f_pressed {
+                        match physical_key {
+                            PhysicalKey::Code(KeyCode::KeyF) => {
+                                // Only toggle on key press
+                                let mut lut_data = lut_manager
+                                    .load_lut(&available_luts[current_lut_index])
+                                    .expect("Failed to load LUT");
+                                if lut_reversed {
+                                    lut_data = lut_manager
+                                        .load_lut(&available_luts[current_lut_index])
+                                        .expect("Failed to load LUT");
+                                } else {
+                                    lut_data.reverse();
+                                }
+                                lut_reversed = !lut_reversed;
+                                let mut lut_data_combined = Vec::with_capacity(768);
+                                lut_data_combined.extend_from_slice(&lut_data.red);
+                                lut_data_combined.extend_from_slice(&lut_data.green);
+                                lut_data_combined.extend_from_slice(&lut_data.blue);
+                                let lut_data_u32: Vec<u32> =
+                                    lut_data_combined.iter().map(|&x| x as u32).collect();
+                                queue.write_buffer(
+                                    &lut_buffer,
+                                    0,
+                                    bytemuck::cast_slice(&lut_data_u32),
+                                );
+                                window.set_title(&format!(
+                                    "Physarum Simulation - LUT: {}{}",
+                                    available_luts[current_lut_index],
+                                    if lut_reversed { " (Reversed)" } else { "" }
+                                ));
+                                last_lut_update = Instant::now();
                             }
                             _ => {}
                         }
@@ -1385,7 +1435,7 @@ fn main() {
                                 (N) Agents:\t{agent_count}\n\
                                 (V) Decay:\t{decay_factor}\n\
                                 (B) Diffusion:\t{diffusion_rate}\n\
-                                (F) Deposition:\t{deposition_amount}\n\
+                                (R) Deposition:\t{deposition_amount}\n\
                                 (J) Jitter:\t{agent_jitter}\n\
                                 (S) Min Speed:\t{agent_speed_min}\n\
                                 (X) Max Speed:\t{agent_speed_max}\n\

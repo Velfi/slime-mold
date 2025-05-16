@@ -29,7 +29,7 @@ The simulation can be controlled using the following keyboard shortcuts:
 - Hold `S` and use arrow keys to adjust speed range
 - Hold `A` and use arrow keys to adjust sensor angle
 - Hold `D` and use arrow keys to adjust sensor distance
-- Hold `F` and use arrow keys to adjust pheromone deposition amount
+- Hold `R` and use arrow keys to adjust pheromone deposition amount
 - Hold `V` and use arrow keys to adjust pheromone decay factor
 - Hold `B` and use arrow keys to adjust pheromone diffusion rate
 - Hold `N` and use arrow keys to adjust agent count (1M/100K increments)
