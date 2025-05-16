@@ -1,124 +1,145 @@
-use circular_queue::CircularQueue;
-use log::{error, info, trace};
-#[cfg(feature = "midi")]
-use midi::{MidiInterface, MidiMessage};
-#[cfg(target_os = "macos")]
-use notify::FsEventWatcher;
-#[cfg(target_os = "linux")]
-use notify::INotifyWatcher;
-#[cfg(target_os = "windows")]
-use notify::ReadDirectoryChangesWatcher;
-use notify::{Error as NotifyError, Event as NotifyEvent, RecursiveMode, Watcher};
-pub use slime::point2::Point2;
-use slime::settings::{DEFAULT_SETTINGS_FILE, Settings};
-pub use slime::simulation::Agent;
-pub use slime::simulation::World;
-pub use slime::swapper::Swapper;
-use std::fs;
-use std::path::Path;
+use bytemuck::cast_slice_mut;
+use slime::settings::Settings;
+use std::borrow::Cow;
 use std::sync::Arc;
-use std::sync::mpsc::Receiver;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use wgpu::util::DeviceExt;
+use wgpu::{Backends, BufferUsages, Instance, TextureUsages};
 use winit::{
     event::{Event, WindowEvent},
-    event_loop::{ControlFlow, EventLoop, EventLoopWindowTarget},
-    keyboard::KeyCode,
-    window::Window,
+    event_loop::EventLoop,
+    window::WindowBuilder,
 };
-use winit_input_helper::WinitInputHelper;
 
-#[cfg(target_os = "macos")]
-pub type SettingsWatcherComponents = (Receiver<Result<NotifyEvent, NotifyError>>, FsEventWatcher);
-#[cfg(target_os = "linux")]
-pub type SettingsWatcherComponents = (Receiver<Result<NotifyEvent, NotifyError>>, INotifyWatcher);
-#[cfg(target_os = "windows")]
-pub type SettingsWatcherComponents = (
-    Receiver<Result<NotifyEvent, NotifyError>>,
-    ReadDirectoryChangesWatcher,
-);
+fn main() {
+    let settings = Settings::load_from_file("simulation_settings.toml")
+        .expect("Failed to load settings simulation_settings.toml");
 
-async fn run(event_loop: EventLoop<()>, window: Arc<Window>, initial_settings: Settings) {
-    let current_settings = initial_settings.clone(); // Used for config width/height initially
-    let (settings_update_receiver, _settings_update_watcher) =
-        setup_settings_file_watcher(DEFAULT_SETTINGS_FILE)
-            .expect("Failed to setup settings file watcher");
+    // Initialize the event loop and window
+    let event_loop = EventLoop::new().unwrap();
+    let window = WindowBuilder::new()
+        .with_title("Physarum Simulation")
+        .build(&event_loop)
+        .unwrap();
 
-    let mut input = WinitInputHelper::new();
+    // FPS counter variables
+    let mut frame_count = 0;
+    let mut last_fps_update = Instant::now();
+    let mut last_frame_time = Instant::now();
+    let fps_update_interval = Duration::from_secs(1);
 
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::all(),
+    // After creating the window, wrap it in Arc for cheap cloning
+    let window = Arc::new(window);
+
+    // Initialize wgpu
+    let instance = Instance::new(wgpu::InstanceDescriptor {
+        backends: Backends::all(),
         ..Default::default()
     });
+    let surface = instance.create_surface(&window).unwrap();
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: Some(&surface),
+        force_fallback_adapter: false,
+    }))
+    .unwrap();
+    let (device, queue) = pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: None,
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+        },
+        None,
+    ))
+    .unwrap();
 
-    // The surface needs to live as long as the window that created it.
-    // Arc::clone(&window) ensures the surface holds a reference to the window.
-    let surface = instance
-        .create_surface(Arc::clone(&window))
-        .expect("Failed to create surface");
+    // Get device limits for texture size
+    let max_texture_dimension = device.limits().max_texture_dimension_2d;
+    println!("[info] Max texture dimension: {}", max_texture_dimension);
 
-    let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::default(),
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        })
-        .await
-        .unwrap();
+    // Use settings for window and simulation parameters
+    let logical_width = settings.window_width;
+    let logical_height = settings.window_height;
+    let agent_count = settings.agent_count;
+    let decay_factor = settings.pheromone_decay_factor;
 
-    let (device, queue) = adapter
-        .request_device(
-            &wgpu::DeviceDescriptor {
-                label: None,
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-            },
-            None, // Trace path
-        )
-        .await
-        .unwrap();
+    // Get physical size for HiDPI/Retina displays
+    let scale_factor = window.scale_factor();
+    let physical_width = (logical_width as f64 * scale_factor) as u32;
+    let physical_height = (logical_height as f64 * scale_factor) as u32;
 
-    // Wrap device and queue in Arc for sharing
-    let device = Arc::new(device);
-    let queue = Arc::new(queue);
-
+    // Configure the surface
     let surface_caps = surface.get_capabilities(&adapter);
-    let surface_format = surface_caps
-        .formats
-        .iter()
-        .copied()
-        .find(|f| f.is_srgb()) // Prefer sRGB
-        .unwrap_or(surface_caps.formats[0]);
-
-    let present_mode = surface_caps
-        .present_modes
-        .iter()
-        .copied()
-        .find(|&mode| mode == wgpu::PresentMode::Mailbox)
-        .unwrap_or_else(|| {
-            surface_caps
-                .present_modes
-                .iter()
-                .copied()
-                .find(|&mode| mode == wgpu::PresentMode::Immediate)
-                .unwrap_or(wgpu::PresentMode::Fifo) // Fallback to Fifo
-        });
-    info!("Selected PresentMode: {:?}", present_mode);
-
+    let surface_format = surface_caps.formats.iter().copied().next().unwrap();
     let mut config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        usage: TextureUsages::RENDER_ATTACHMENT,
         format: surface_format,
-        width: current_settings.window_width,
-        height: current_settings.window_height,
-        present_mode, // Use the selected present mode
+        width: physical_width,
+        height: physical_height,
+        present_mode: surface_caps.present_modes[0],
         alpha_mode: surface_caps.alpha_modes[0],
         view_formats: vec![],
-        desired_maximum_frame_latency: 1,
+        desired_maximum_frame_latency: 2,
     };
     surface.configure(&device, &config);
 
-    // Sampler remains, as it's for sampling the world's display texture
-    let sim_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("Simulation Sampler"),
+    // Create the simulation state (agent buffer and trail map)
+    let agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Agent Buffer"),
+        size: (agent_count * 4 * std::mem::size_of::<f32>()) as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        mapped_at_creation: true,
+    });
+    // Initialize agents with random positions and angles (as f32)
+    {
+        let mut agent_data = agent_buffer.slice(..).get_mapped_range_mut();
+        let agent_f32: &mut [f32] = cast_slice_mut(&mut agent_data);
+        for i in 0..agent_count {
+            let offset = i * 4;
+            agent_f32[offset] = rand::random::<f32>() * physical_width as f32;
+            agent_f32[offset + 1] = rand::random::<f32>() * physical_height as f32;
+            agent_f32[offset + 2] = rand::random::<f32>() * 2.0 * std::f32::consts::PI;
+            let speed_range = settings.agent_speed_max - settings.agent_speed_min;
+            agent_f32[offset + 3] = settings.agent_speed_min + rand::random::<f32>() * speed_range;
+        }
+    }
+    agent_buffer.unmap();
+
+    // Create the trail map as a storage buffer instead of a storage texture
+    let trail_map_size = (physical_width * physical_height) as usize;
+    let trail_map_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Trail Map Buffer"),
+        size: (trail_map_size * std::mem::size_of::<f32>()) as u64,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    // Create the display texture
+    let texture_width = physical_width.min(max_texture_dimension);
+    let texture_height = physical_height.min(max_texture_dimension);
+    let display_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Display Texture"),
+        size: wgpu::Extent3d {
+            width: texture_width,
+            height: texture_height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let display_view = display_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // Create a sampler for the display texture
+    let display_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("Display Sampler"),
         address_mode_u: wgpu::AddressMode::ClampToEdge,
         address_mode_v: wgpu::AddressMode::ClampToEdge,
         address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -128,76 +149,281 @@ async fn run(event_loop: EventLoop<()>, window: Arc<Window>, initial_settings: S
         ..Default::default()
     });
 
-    // Shader
-    let shader_source = wgpu::ShaderSource::Wgsl(
-        fs::read_to_string("src/shaders/display.wgsl")
-            .expect("Should have been able to read the file")
-            .into(),
-    );
-
-    let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Shader Module"),
-        source: shader_source,
+    // Create a uniform buffer for simulation/display size
+    #[repr(C)]
+    #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+    struct SimSizeUniform {
+        width: u32,
+        height: u32,
+        decay_factor: f32,
+        agent_jitter: f32,
+        agent_speed_min: f32,
+        agent_speed_max: f32,
+        agent_turn_speed: f32,
+        agent_sensor_angle: f32,
+        agent_sensor_distance: f32,
+        diffusion_rate: f32,
+        pheromone_deposition_amount: f32,
+        _pad: [u32; 1],
+    }
+    let sim_size_uniform = SimSizeUniform {
+        width: physical_width,
+        height: physical_height,
+        decay_factor,
+        agent_jitter: settings.agent_jitter,
+        agent_speed_min: settings.agent_speed_min,
+        agent_speed_max: settings.agent_speed_max,
+        agent_turn_speed: settings.agent_turn_speed,
+        agent_sensor_angle: settings.agent_sensor_angle,
+        agent_sensor_distance: settings.agent_sensor_distance,
+        diffusion_rate: settings.pheromone_diffusion_rate,
+        pheromone_deposition_amount: settings.pheromone_deposition_amount,
+        _pad: [0],
+    };
+    let sim_size_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Sim Size Uniform Buffer"),
+        contents: bytemuck::bytes_of(&sim_size_uniform),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
+    // Create bind group layout and bind group for the compute pipeline
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Texture Bind Group Layout"),
+        label: Some("Compute Bind Group Layout"),
         entries: &[
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
                 },
                 count: None,
             },
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
                 count: None,
             },
         ],
     });
 
-    let mut world = World::new(current_settings, Arc::clone(&device), Arc::clone(&queue));
+    // Create the compute pipeline
+    let compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Compute Shader"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("compute.wgsl"))),
+    });
 
-    // Initialize bind_group using the texture view from the World
+    let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Compute Pipeline"),
+        layout: Some(
+            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Compute Pipeline Layout"),
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+            }),
+        ),
+        module: &compute_shader,
+        entry_point: "main",
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+    });
+
+    // Create the decay pipeline (after compute_pipeline)
+    let decay_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Decay Pipeline"),
+        layout: Some(
+            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Decay Pipeline Layout"),
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+            }),
+        ),
+        module: &compute_shader,
+        entry_point: "decay_trail",
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+    });
+
+    let diffuse_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Diffuse Pipeline"),
+        layout: Some(
+            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Diffuse Pipeline Layout"),
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+            }),
+        ),
+        module: &compute_shader,
+        entry_point: "diffuse_trail",
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+    });
+
+    // Create bind group
     let mut bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Texture Bind Group"),
+        label: Some("Compute Bind Group"),
         layout: &bind_group_layout,
         entries: &[
             wgpu::BindGroupEntry {
                 binding: 0,
-                // Get the display texture view from the world instance
-                resource: wgpu::BindingResource::TextureView(world.get_display_texture_view()),
+                resource: agent_buffer.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::Sampler(&sim_sampler),
+                resource: trail_map_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: sim_size_buffer.as_entire_binding(),
             },
         ],
     });
 
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Render Pipeline Layout"),
-        bind_group_layouts: &[&bind_group_layout],
-        push_constant_ranges: &[],
+    // Create bind group layout and bind group for display compute pipeline
+    let display_bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Display Compute Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+    let mut display_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Display Compute Bind Group"),
+        layout: &display_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: trail_map_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&display_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: sim_size_buffer.as_entire_binding(),
+            },
+        ],
+    });
+    let display_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Display Compute Shader"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("display.wgsl"))),
+    });
+    let display_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("Display Compute Pipeline"),
+        layout: Some(
+            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Display Compute Pipeline Layout"),
+                bind_group_layouts: &[&display_bind_group_layout],
+                push_constant_ranges: &[],
+            }),
+        ),
+        module: &display_shader,
+        entry_point: "main",
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
     });
 
+    // Create bind group layout and bind group for the render pipeline
+    let render_bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Render Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+    let mut render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Render Bind Group"),
+        layout: &render_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&display_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&display_sampler),
+            },
+        ],
+    });
+
+    // Load quad.wgsl and create the render pipeline
+    let quad_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Quad Shader"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("quad.wgsl"))),
+    });
+    let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Render Pipeline Layout"),
+        bind_group_layouts: &[&render_bind_group_layout],
+        push_constant_ranges: &[],
+    });
     let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("Render Pipeline"),
-        layout: Some(&pipeline_layout),
+        layout: Some(&render_pipeline_layout),
         vertex: wgpu::VertexState {
-            module: &shader_module,
+            module: &quad_shader,
             entry_point: "vs_main",
-            buffers: &[], // No vertex buffers, vertices generated in shader
+            buffers: &[],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         },
         fragment: Some(wgpu::FragmentState {
-            module: &shader_module,
+            module: &quad_shader,
             entry_point: "fs_main",
             targets: &[Some(wgpu::ColorTargetState {
                 format: config.format,
@@ -207,331 +433,374 @@ async fn run(event_loop: EventLoop<()>, window: Arc<Window>, initial_settings: S
             compilation_options: wgpu::PipelineCompilationOptions::default(),
         }),
         primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleStrip,
+            topology: wgpu::PrimitiveTopology::TriangleList,
             strip_index_format: None,
             front_face: wgpu::FrontFace::Ccw,
             cull_mode: None,
-            polygon_mode: wgpu::PolygonMode::Fill,
             unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
             conservative: false,
         },
         depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(), // Simplified
+        multisample: wgpu::MultisampleState::default(),
         multiview: None,
     });
 
-    #[cfg(feature = "midi")]
-    let mut midi_interface =
-        MidiInterface::new(Some("Summit")).expect("Midi interface creation failed");
-    #[cfg(feature = "midi")]
-    midi_interface.open().expect("Midi interface open failed");
+    // Main event loop
+    let window_for_event = window.clone();
+    event_loop
+        .run(move |event, target| {
+            let window = &window_for_event;
+            target.set_control_flow(winit::event_loop::ControlFlow::Poll);
+            match event {
+                Event::WindowEvent {
+                    event: WindowEvent::CloseRequested,
+                    ..
+                } => target.exit(),
+                Event::WindowEvent {
+                    event: WindowEvent::Resized(new_size),
+                    ..
+                } => {
+                    // Store old sizes
+                    let old_width = config.width;
+                    let old_height = config.height;
 
-    let _last_log_time = Instant::now();
-    let _frame_times: CircularQueue<f32> = CircularQueue::with_capacity(60);
+                    // Get the current scale factor
+                    let scale_factor = window.scale_factor();
 
-    let mut frame_time = 0.16;
-    let mut time_of_last_frame_start = Instant::now();
-    let mut frame_counter = 0;
-    let mut fps_values = CircularQueue::with_capacity(5);
-    let mut time_of_last_fps_counter_update = Instant::now();
+                    // Calculate logical size from physical size
+                    let logical_width = (new_size.width as f64 / scale_factor) as u32;
+                    let logical_height = (new_size.height as f64 / scale_factor) as u32;
 
-    let window_for_event_loop = Arc::clone(&window); // Clone Arc for the event loop closure
+                    // Calculate physical size for HiDPI/Retina displays
+                    let physical_width = (logical_width as f64 * scale_factor) as u32;
+                    let physical_height = (logical_height as f64 * scale_factor) as u32;
 
-    event_loop.set_control_flow(ControlFlow::Poll);
-    let result = event_loop.run(move |event, elwt: &EventLoopWindowTarget<()>| {
-        // Process events with WinitInputHelper first
-        if input.update(&event) {
-            // Input helper consumed the event, check its state
-            if input.key_pressed(KeyCode::Escape) || input.close_requested() || input.destroyed() {
-                elwt.exit();
-                return; // Exit event processing for this iteration
-            }
-            if input.key_pressed(KeyCode::KeyD) {
-                world.toggle_dynamic_gradient();
-            }
-            if let Some(size) = input.window_resized() {
-                info!("Window resized (via input helper) to: {:?}", size);
-                if size.width > 0 && size.height > 0 {
-                    config.width = size.width;
-                    config.height = size.height;
+                    println!(
+                        "[resize] logical size: {}x{}, physical size: {}x{}, scale factor: {}",
+                        logical_width,
+                        logical_height,
+                        physical_width,
+                        physical_height,
+                        scale_factor
+                    );
+
+                    // --- SCALE AGENT POSITIONS ---
+                    {
+                        let agent_buf_size = (agent_count * 4 * std::mem::size_of::<f32>()) as u64;
+                        let temp_agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("Temp Agent Buffer"),
+                            size: agent_buf_size,
+                            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
+                        // Copy from agent_buffer to temp_agent_buffer
+                        let mut encoder =
+                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("Agent Copy Encoder"),
+                            });
+                        encoder.copy_buffer_to_buffer(
+                            &agent_buffer,
+                            0,
+                            &temp_agent_buffer,
+                            0,
+                            agent_buf_size,
+                        );
+                        queue.submit(Some(encoder.finish()));
+                        // Map and read
+                        {
+                            let agent_slice = temp_agent_buffer.slice(..);
+                            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+                            agent_slice
+                                .map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+                            device.poll(wgpu::Maintain::Wait);
+                            receiver.recv().unwrap().unwrap();
+                            let agent_data = agent_slice.get_mapped_range();
+                            let mut agents: Vec<f32> = bytemuck::cast_slice(&agent_data).to_vec();
+                            // Scale positions
+                            for i in 0..agent_count {
+                                let offset = i * 4;
+                                agents[offset] =
+                                    agents[offset] * (physical_width as f32 / old_width as f32);
+                                agents[offset + 1] = agents[offset + 1]
+                                    * (physical_height as f32 / old_height as f32);
+                            }
+                            drop(agent_data);
+                            // Write back
+                            queue.write_buffer(&agent_buffer, 0, bytemuck::cast_slice(&agents));
+                        }
+                        // temp_agent_buffer drops here
+                    }
+
+                    // --- SCALE PHEROMONE/TRAIL MAP ---
+                    {
+                        let new_size = (physical_width * physical_height) as usize;
+                        let trail_buf_size =
+                            (old_width * old_height * std::mem::size_of::<f32>() as u32) as u64;
+                        let temp_trail_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("Temp Trail Buffer"),
+                            size: trail_buf_size,
+                            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        });
+                        // Copy from trail_map_buffer to temp_trail_buffer
+                        let mut encoder =
+                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("Trail Copy Encoder"),
+                            });
+                        encoder.copy_buffer_to_buffer(
+                            &trail_map_buffer,
+                            0,
+                            &temp_trail_buffer,
+                            0,
+                            trail_buf_size,
+                        );
+                        queue.submit(Some(encoder.finish()));
+                        // Map and read
+                        {
+                            let trail_slice = temp_trail_buffer.slice(..);
+                            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+                            trail_slice
+                                .map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+                            device.poll(wgpu::Maintain::Wait);
+                            receiver.recv().unwrap().unwrap();
+                            let trail_data = trail_slice.get_mapped_range();
+                            let old_trail: Vec<f32> = bytemuck::cast_slice(&trail_data).to_vec();
+                            drop(trail_data);
+                            // Nearest-neighbor resample
+                            let mut new_trail = vec![0.0f32; new_size];
+                            for y in 0..physical_height {
+                                for x in 0..physical_width {
+                                    let src_x = (x as u64 * old_width as u64
+                                        / physical_width as u64)
+                                        as u32;
+                                    let src_y = (y as u64 * old_height as u64
+                                        / physical_height as u64)
+                                        as u32;
+                                    let src_idx = (src_y * old_width + src_x) as usize;
+                                    let dst_idx = (y * physical_width + x) as usize;
+                                    if src_idx < old_trail.len() && dst_idx < new_trail.len() {
+                                        new_trail[dst_idx] = old_trail[src_idx];
+                                    }
+                                }
+                            }
+                            // Write back
+                            queue.write_buffer(
+                                &trail_map_buffer,
+                                0,
+                                bytemuck::cast_slice(&new_trail),
+                            );
+                        }
+                        // temp_trail_buffer drops here
+                    }
+
+                    // Update surface configuration
+                    config.width = physical_width;
+                    config.height = physical_height;
                     surface.configure(&device, &config);
 
-                    // World handles its own texture resizing internally now
-                    world.resize(config.width, config.height);
+                    // Recreate the display texture
+                    let texture_width = physical_width.min(max_texture_dimension);
+                    let texture_height = physical_height.min(max_texture_dimension);
+                    println!(
+                        "[resize] texture_width: {}, texture_height: {}, max_texture_dimension: {}",
+                        texture_width, texture_height, max_texture_dimension
+                    );
+                    println!(
+                        "[resize] display_texture size: width: {}, height: {}",
+                        texture_width, texture_height
+                    );
 
-                    // Recreate bind group with the new texture view from the resized world
+                    // Update uniform buffer with new size
+                    let sim_size_uniform = SimSizeUniform {
+                        width: physical_width,
+                        height: physical_height,
+                        decay_factor,
+                        agent_jitter: settings.agent_jitter,
+                        agent_speed_min: settings.agent_speed_min,
+                        agent_speed_max: settings.agent_speed_max,
+                        agent_turn_speed: settings.agent_turn_speed,
+                        agent_sensor_angle: settings.agent_sensor_angle,
+                        agent_sensor_distance: settings.agent_sensor_distance,
+                        diffusion_rate: settings.pheromone_diffusion_rate,
+                        pheromone_deposition_amount: settings.pheromone_deposition_amount,
+                        _pad: [0],
+                    };
+                    queue.write_buffer(&sim_size_buffer, 0, bytemuck::bytes_of(&sim_size_uniform));
+
+                    // Recreate the bind groups with new resources
                     bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Texture Bind Group (Resized)"),
+                        label: Some("Compute Bind Group"),
                         layout: &bind_group_layout,
                         entries: &[
                             wgpu::BindGroupEntry {
                                 binding: 0,
-                                resource: wgpu::BindingResource::TextureView(
-                                    world.get_display_texture_view(),
-                                ),
+                                resource: agent_buffer.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&sim_sampler),
+                                resource: trail_map_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: sim_size_buffer.as_entire_binding(),
+                            },
+                        ],
+                    });
+
+                    display_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Display Compute Bind Group"),
+                        layout: &display_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: trail_map_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&display_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: sim_size_buffer.as_entire_binding(),
+                            },
+                        ],
+                    });
+
+                    render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Render Bind Group"),
+                        layout: &render_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&display_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&display_sampler),
                             },
                         ],
                     });
                 }
-            }
-        }
+                Event::AboutToWait => {
+                    // Calculate FPS
+                    frame_count += 1;
+                    let current_time = Instant::now();
+                    let elapsed = current_time - last_fps_update;
 
-        // After input helper, handle specific winit events
-        match event {
-            Event::WindowEvent {
-                event: window_event,
-                window_id,
-            } if window_id == window_for_event_loop.id() => match window_event {
-                WindowEvent::CloseRequested => elwt.exit(),
-                WindowEvent::Resized(physical_size) => {
-                    // This might be redundant if input.window_resized() already handled it,
-                    // but direct handling ensures wgpu surface is configured.
-                    info!("Window resized (direct event) to: {:?}", physical_size);
-                    if physical_size.width > 0 && physical_size.height > 0 {
-                        config.width = physical_size.width;
-                        config.height = physical_size.height;
-                        surface.configure(&device, &config);
+                    if elapsed >= fps_update_interval {
+                        let fps = frame_count as f64 / elapsed.as_secs_f64();
+                        let frame_time = (current_time - last_frame_time).as_secs_f64() * 1000.0;
+                        window.set_title(&format!(
+                            "Physarum Simulation - FPS: {:.1} ({:.1}ms)",
+                            fps, frame_time
+                        ));
+                        frame_count = 0;
+                        last_fps_update = current_time;
+                    }
+                    last_frame_time = current_time;
 
-                        // World handles its own texture resizing internally now
-                        world.resize(config.width, config.height);
+                    // Run the compute pass to update agents and trail map
+                    let mut encoder = device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                    {
+                        let mut compute_pass =
+                            encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                                label: None,
+                                timestamp_writes: None,
+                            });
+                        compute_pass.set_pipeline(&compute_pipeline);
+                        compute_pass.set_bind_group(0, &bind_group, &[]);
+                        compute_pass.dispatch_workgroups((agent_count as u32 + 63) / 64, 1, 1);
+                    }
+                    queue.submit(Some(encoder.finish()));
 
-                        // Recreate bind group with the new texture view from the resized world
-                        bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("Texture Bind Group (Resized)"),
-                            layout: &bind_group_layout,
-                            entries: &[
-                                wgpu::BindGroupEntry {
-                                    binding: 0,
-                                    resource: wgpu::BindingResource::TextureView(
-                                        world.get_display_texture_view(),
-                                    ),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 1,
-                                    resource: wgpu::BindingResource::Sampler(&sim_sampler),
-                                },
-                            ],
+                    // Run the decay pass
+                    let mut encoder = device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                    {
+                        let mut decay_pass =
+                            encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                                label: Some("Decay Pass"),
+                                timestamp_writes: None,
+                            });
+                        decay_pass.set_pipeline(&decay_pipeline);
+                        decay_pass.set_bind_group(0, &bind_group, &[]);
+                        let workgroup_size = 16u32;
+                        let dispatch_x = (physical_width + workgroup_size - 1) / workgroup_size;
+                        let dispatch_y = (physical_height + workgroup_size - 1) / workgroup_size;
+                        decay_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+                    }
+                    queue.submit(Some(encoder.finish()));
+
+                    // Run the display compute pass
+                    let mut encoder = device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                    {
+                        let mut compute_pass =
+                            encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                                label: None,
+                                timestamp_writes: None,
+                            });
+                        compute_pass.set_pipeline(&display_pipeline);
+                        compute_pass.set_bind_group(0, &display_bind_group, &[]);
+                        let workgroup_size = 16u32;
+                        let dispatch_x = (physical_width + workgroup_size - 1) / workgroup_size;
+                        let dispatch_y = (physical_height + workgroup_size - 1) / workgroup_size;
+                        compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+                    }
+                    queue.submit(Some(encoder.finish()));
+
+                    // Run diffusion
+                    let mut encoder = device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                    let mut diffuse_pass =
+                        encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("Diffuse Pass"),
+                            timestamp_writes: None,
                         });
-                    }
-                }
-                WindowEvent::RedrawRequested => {
-                    world.set_frame_time(frame_time); // Set frame time before simulation step (world.update() will use this)
-
-                    // World's internal display texture is updated during world.update()
-                    // No direct world.draw() call or frame_data needed here.
-
-                    match surface.get_current_texture() {
-                        Ok(output_frame) => {
-                            let view = output_frame
-                                .texture
-                                .create_view(&wgpu::TextureViewDescriptor::default());
-                            let mut encoder =
-                                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                    label: Some("Render Encoder"),
-                                });
-                            {
-                                let mut render_pass =
-                                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                        label: Some("Render Pass"),
-                                        color_attachments: &[Some(
-                                            wgpu::RenderPassColorAttachment {
-                                                view: &view,
-                                                resolve_target: None,
-                                                ops: wgpu::Operations {
-                                                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                                                        r: 0.0,
-                                                        g: 0.0,
-                                                        b: 0.0,
-                                                        a: 1.0,
-                                                    }),
-                                                    store: wgpu::StoreOp::Store,
-                                                },
-                                            },
-                                        )],
-                                        depth_stencil_attachment: None,
-                                        timestamp_writes: None,
-                                        occlusion_query_set: None,
-                                    });
-                                render_pass.set_pipeline(&render_pipeline);
-                                render_pass.set_bind_group(0, &bind_group, &[]);
-                                render_pass.draw(0..4, 0..1);
-                            }
-                            queue.submit(std::iter::once(encoder.finish()));
-                            output_frame.present();
-                        }
-                        Err(wgpu::SurfaceError::Lost) => {
-                            config.width = world.window_width();
-                            config.height = world.window_height();
-                            if config.width > 0 && config.height > 0 {
-                                surface.configure(&device, &config);
-                            }
-                        }
-                        Err(wgpu::SurfaceError::OutOfMemory) => {
-                            error!("SurfaceError::OutOfMemory");
-                            elwt.exit();
-                        }
-                        Err(e) => {
-                            error!("Unhandled surface error: {:?}, reconfiguring", e);
-                            config.width = world.window_width();
-                            config.height = world.window_height();
-                            if config.width > 0 && config.height > 0 {
-                                surface.configure(&device, &config);
-                            }
-                        }
-                    }
-
-                    frame_time = time_of_last_frame_start.elapsed().as_secs_f32();
-                    time_of_last_frame_start = Instant::now();
-                    frame_counter += 1;
-                    if time_of_last_fps_counter_update.elapsed().as_secs() > 1 {
-                        time_of_last_fps_counter_update = Instant::now();
-                        let _ = fps_values.push(frame_counter);
-                        frame_counter = 0;
-                        let fps_sum: i32 = fps_values.iter().sum();
-                        let avg_fps = fps_sum as f64 / fps_values.len() as f64;
-                        info!("FPS {}", avg_fps.trunc());
-                        window_for_event_loop
-                            .set_title(&format!("Slime Mold - FPS: {:.0}", avg_fps.trunc()));
-                    }
-                }
-                _ => {} // Other window events handled by input.update or ignored
-            },
-            Event::AboutToWait => {
-                world.update();
-                window_for_event_loop.request_redraw();
-            }
-            _ => {} // Other event types
-        }
-
-        // Handle MIDI events if feature is enabled
-        #[cfg(feature = "midi")]
-        for midi_event in midi_interface.pending_events() {
-            match midi_event {
-                MidiMessage::NoteOn { key, vel } => {
-                    let (key_val, vel_val) = (key.as_int(), vel.as_int());
-                    info!("hit note {} with vel {}", key_val, vel_val);
-                    let mut new_agents: Vec<_> = (0..5)
-                        .into_iter()
-                        .map(|_| new_agent_from_midi(key_val, vel_val))
-                        .collect();
-                    world.agents.append(&mut new_agents); // Assuming world.agents is public or has an add_agents method
-                }
-                MidiMessage::NoteOff { key, vel } => {
-                    trace!("released note {} with vel {}", key.as_int(), vel.as_int());
-                }
-                MidiMessage::Aftertouch { key, vel } => {
-                    trace!("Aftertouch: key {} vel {}", key.as_int(), vel.as_int());
-                }
-                MidiMessage::Controller { controller, value } => {
-                    trace!(
-                        "Controller {} value {}",
-                        controller.as_int(),
-                        value.as_int()
+                    diffuse_pass.set_pipeline(&diffuse_pipeline);
+                    diffuse_pass.set_bind_group(0, &bind_group, &[]);
+                    diffuse_pass.dispatch_workgroups(
+                        (physical_width + 15) / 16,
+                        (physical_height + 15) / 16,
+                        1,
                     );
-                    handle_controller_input(&mut world, controller.as_int(), value.as_int());
+                    drop(diffuse_pass);
+                    queue.submit(Some(encoder.finish()));
+
+                    // Render the trail map to the screen
+                    let frame = surface.get_current_texture().unwrap();
+                    let view = frame
+                        .texture
+                        .create_view(&wgpu::TextureViewDescriptor::default());
+                    let mut encoder = device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                    {
+                        let mut render_pass =
+                            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: None,
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: &view,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                })],
+                                depth_stencil_attachment: None,
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                            });
+                        render_pass.set_pipeline(&render_pipeline);
+                        render_pass.set_bind_group(0, &render_bind_group, &[]);
+                        render_pass.draw(0..6, 0..1);
+                    }
+                    queue.submit(Some(encoder.finish()));
+                    frame.present();
                 }
-                _ => (),
+                _ => {}
             }
-        }
-
-        // Handle settings file updates
-        match settings_update_receiver.try_recv() {
-            Ok(_event) => {
-                info!("Settings file has changed. Reloading it and updating the World");
-                if let Err(e) = world.reload_settings() {
-                    error!("failed to reload settings file: {}", e)
-                }
-            }
-            Err(e) => {
-                if e != std::sync::mpsc::TryRecvError::Empty {
-                    // Don't trace if just empty
-                    trace!("settings_update_receiver watch error: {:?}", e);
-                }
-            }
-        }
-    });
-
-    if let Err(e) = result {
-        error!("Event loop error: {:?}", e);
-    }
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let _ = dotenv::dotenv();
-    env_logger::init();
-    let initial_settings = Settings::load_from_file(DEFAULT_SETTINGS_FILE)?;
-
-    let event_loop = EventLoop::new().unwrap();
-
-    let window = Arc::new(
-        winit::window::WindowBuilder::new()
-            .with_title("Slime Mold")
-            .with_inner_size(winit::dpi::PhysicalSize::new(
-                initial_settings.window_width,
-                initial_settings.window_height,
-            ))
-            .build(&event_loop)?,
-    );
-
-    pollster::block_on(run(event_loop, window, initial_settings));
-
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn setup_settings_file_watcher(
-    path: impl AsRef<Path>,
-) -> Result<SettingsWatcherComponents, Box<dyn std::error::Error>> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let mut watcher: ReadDirectoryChangesWatcher = Watcher::new(tx, notify::Config::default())?;
-    watcher.watch(path.as_ref(), RecursiveMode::Recursive)?;
-    Ok((rx, watcher))
-}
-
-#[cfg(target_os = "macos")]
-fn setup_settings_file_watcher(
-    path: impl AsRef<Path>,
-) -> Result<SettingsWatcherComponents, Box<dyn std::error::Error>> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let mut watcher: FsEventWatcher =
-        notify::recommended_watcher(move |res: Result<NotifyEvent, NotifyError>| {
-            if let Err(e) = tx.send(res) {
-                error!("Error sending file watch event: {}", e);
-            }
-        })?;
-    watcher.watch(path.as_ref(), RecursiveMode::Recursive)?;
-    Ok((rx, watcher))
-}
-
-#[cfg(target_os = "linux")]
-fn setup_settings_file_watcher(
-    path: impl AsRef<Path>,
-) -> Result<SettingsWatcherComponents, Box<dyn std::error::Error>> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let mut watcher: INotifyWatcher =
-        notify::recommended_watcher(move |res: Result<NotifyEvent, NotifyError>| {
-            if let Err(e) = tx.send(res) {
-                error!("Error sending file watch event: {}", e);
-            }
-        })?;
-    watcher.watch(path.as_ref(), RecursiveMode::Recursive)?;
-    Ok((rx, watcher))
-}
-
-// Helper for MIDI if needed, placeholder
-#[cfg(feature = "midi")]
-fn new_agent_from_midi(_key: u8, _vel: u8) -> Agent {
-    // Placeholder implementation - you'll need to define this based on your Agent::new or similar
-    // This function was referenced but not defined in the provided main.rs snippet when MIDI was active
-    let temp_settings = Settings::default(); // Or fetch current world settings
-    Agent::new_from_settings(&temp_settings)
-}
-
-#[cfg(feature = "midi")]
-fn handle_controller_input(_world: &mut World, _controller: u8, _value: u8) {
-    // Placeholder
+        })
+        .expect("Error in event loop");
 }
