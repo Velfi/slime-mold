@@ -9,7 +9,7 @@ pub const DEFAULT_IS_FULLSCREEN: bool = false;
 pub const AGENT_COUNT: usize = 10_000_000;
 pub const AGENT_SPEED_MIN: f32 = 30.0;
 pub const AGENT_SPEED_MAX: f32 = 50.0;
-pub const AGENT_TURN_SPEED: f32 = 6.5;
+pub const AGENT_TURN_SPEED: f32 = 0.43; // ~25 degrees
 pub const AGENT_POSSIBLE_STARTING_HEADINGS: std::ops::Range<f32> = 0.0..360.0;
 pub const DEPOSITION_AMOUNT: f32 = 1.0;
 pub const AGENT_JITTER: f32 = 0.0;
@@ -21,6 +21,10 @@ pub const AGENT_SENSOR_DISTANCE: f32 = 20.0;
 pub const DECAY_FACTOR: f32 = 10.0;
 /// Represents how quickly pheromones diffuse to neighboring cells
 pub const DIFFUSION_RATE: f32 = 1.0;
+/// Default radius for Gaussian blur
+pub const BLUR_RADIUS: f32 = 2.0;
+/// Default sigma for Gaussian blur
+pub const BLUR_SIGMA: f32 = 1.0;
 
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -38,6 +42,8 @@ pub struct Settings {
     pub window_width: u32,
     pub agent_sensor_angle: f32,
     pub agent_sensor_distance: f32,
+    pub blur_radius: f32,
+    pub blur_sigma: f32,
 }
 
 impl Default for Settings {
@@ -57,6 +63,8 @@ impl Default for Settings {
             window_width: DEFAULT_WIDTH,
             agent_sensor_angle: AGENT_SENSOR_ANGLE,
             agent_sensor_distance: AGENT_SENSOR_DISTANCE,
+            blur_radius: BLUR_RADIUS,
+            blur_sigma: BLUR_SIGMA,
         }
     }
 }

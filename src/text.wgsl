@@ -53,6 +53,8 @@ struct SimSizeUniform {
     agent_sensor_distance: f32,
     diffusion_rate: f32,
     pheromone_deposition_amount: f32,
+    blur_radius: f32,
+    blur_sigma: f32,
     _pad1: u32,
 };
 

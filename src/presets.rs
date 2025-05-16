@@ -1,5 +1,6 @@
 //! Presets for the simulation
 
+
 use crate::settings::Settings;
 
 pub struct Preset {
@@ -45,27 +46,12 @@ pub fn init_preset_manager() -> PresetManager {
     let mut preset_manager = PresetManager::new();
     preset_manager.add_preset(Preset::new("Default".to_string(), Settings::default()));
     preset_manager.add_preset(Preset::new(
-        "Firecracker Trees".to_string(),
-        Settings {
-            agent_jitter: 0.1,
-            agent_speed_min: 60.0,
-            agent_speed_max: 60.0,
-            agent_turn_speed: 0.8,
-            agent_sensor_angle: 0.3,
-            agent_sensor_distance: 20.0,
-            pheromone_deposition_amount: 1.0,
-            pheromone_decay_factor: 10.0,
-            pheromone_diffusion_rate: 1.0,
-            ..Settings::default()
-        },
-    ));
-    preset_manager.add_preset(Preset::new(
         "Sponge".to_string(),
         Settings {
             agent_jitter: 0.0,
             agent_speed_min: 20.0,
             agent_speed_max: 30.0,
-            agent_turn_speed: 2.0,
+            agent_turn_speed: 0.43,
             agent_sensor_angle: 0.3,
             agent_sensor_distance: 20.0,
             pheromone_deposition_amount: 1.0,
@@ -75,12 +61,27 @@ pub fn init_preset_manager() -> PresetManager {
         },
     ));
     preset_manager.add_preset(Preset::new(
-        "Spiky".to_string(),
+        "Firecracker Trees".to_string(),
+        Settings {
+            agent_jitter: 0.1,
+            agent_speed_min: 60.0,
+            agent_speed_max: 60.0,
+            agent_turn_speed: 1.47,
+            agent_sensor_angle: 0.3,
+            agent_sensor_distance: 20.0,
+            pheromone_deposition_amount: 1.0,
+            pheromone_decay_factor: 10.0,
+            pheromone_diffusion_rate: 1.0,
+            ..Settings::default()
+        },
+    ));
+    preset_manager.add_preset(Preset::new(
+        "Threads".to_string(),
         Settings {
             agent_jitter: 0.0,
             agent_speed_min: 70.0,
             agent_speed_max: 80.0,
-            agent_turn_speed: 1.0,
+            agent_turn_speed: 0.02,
             agent_sensor_angle: 0.3,
             agent_sensor_distance: 20.0,
             pheromone_deposition_amount: 1.0,
@@ -92,6 +93,7 @@ pub fn init_preset_manager() -> PresetManager {
     preset_manager.add_preset(Preset::new(
         "Curls".to_string(),
         Settings {
+            agent_count: 3_000_000,
             agent_jitter: 5.0,
             agent_speed_min: 70.0,
             agent_speed_max: 80.0,
@@ -99,7 +101,7 @@ pub fn init_preset_manager() -> PresetManager {
             agent_sensor_angle: 0.3,
             agent_sensor_distance: 20.0,
             pheromone_deposition_amount: 1.0,
-            pheromone_decay_factor: 10.0,
+            pheromone_decay_factor: 75.0,
             pheromone_diffusion_rate: 0.1,
             ..Settings::default()
         },
@@ -110,7 +112,7 @@ pub fn init_preset_manager() -> PresetManager {
             agent_jitter: 1.0,
             agent_speed_min: 30.0,
             agent_speed_max: 50.0,
-            agent_turn_speed: 6.2,
+            agent_turn_speed: 6.0,
             agent_sensor_angle: 0.3,
             agent_sensor_distance: 20.0,
             pheromone_deposition_amount: 1.0,
@@ -125,7 +127,22 @@ pub fn init_preset_manager() -> PresetManager {
             agent_jitter: 3.0,
             agent_speed_min: 100.0,
             agent_speed_max: 120.0,
-            agent_turn_speed: 6.5,
+            agent_turn_speed: 0.37,
+            agent_sensor_angle: 1.34,
+            agent_sensor_distance: 225.0,
+            pheromone_deposition_amount: 1.0,
+            pheromone_decay_factor: 10.0,
+            pheromone_diffusion_rate: 1.0,
+            ..Settings::default()
+        },
+    ));
+    preset_manager.add_preset(Preset::new(
+        "Mesh".to_string(),
+        Settings {
+            agent_jitter: 3.0,
+            agent_speed_min: 100.0,
+            agent_speed_max: 120.0,
+            agent_turn_speed: 6.0,
             agent_sensor_angle: 1.57,
             agent_sensor_distance: 225.0,
             pheromone_deposition_amount: 1.0,

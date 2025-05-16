@@ -8,6 +8,7 @@ A GPU-accelerated slime mold simulation written in Rust using WGPU. This project
 - Interactive parameter customization for slime behavior
 - Multiple presets for different simulation patterns
 - Custom LUT (Look-Up Table) support for color visualization
+- Configurable Gaussian blur for trail diffusion
 
 ## Quickstart
 
@@ -17,23 +18,24 @@ Run the simulation with `cargo`:
 cargo run --release
 ```
 
-## Controls
+## Key Bindings
 
-The simulation can be controlled using the following keyboard shortcuts:
-- Press `/` to toggle help text
-- Press `P` to cycle presets (Shift+P for reverse)
-- Press `C` to clear trail map
-- Press `G` to cycle LUTs (Shift+G for reverse)
-- Hold `T` and use arrow keys to adjust turn speed
-- Hold `J` and use arrow keys to adjust jitter
-- Hold `S` and use arrow keys to adjust speed range
-- Hold `A` and use arrow keys to adjust sensor angle
-- Hold `D` and use arrow keys to adjust sensor distance
-- Hold `R` and use arrow keys to adjust pheromone deposition amount
-- Hold `V` and use arrow keys to adjust pheromone decay factor
-- Hold `B` and use arrow keys to adjust pheromone diffusion rate
-- Hold `N` and use arrow keys to adjust agent count (1M/100K increments)
-- Hold `Shift` with any of the above for fine adjustments
+- `P`: Cycle through presets (Shift+P for reverse)
+- `N`: Adjust agent count (Shift+N for fine control)
+- `V`: Adjust pheromone decay factor (Shift+V for fine control)
+- `B`: Adjust pheromone diffusion rate (Shift+B for fine control)
+- `R`: Adjust pheromone deposition amount (Shift+R for fine control)
+- `J`: Adjust agent jitter (Shift+J for fine control)
+- `S`: Adjust minimum agent speed (Shift+S for fine control)
+- `X`: Adjust maximum agent speed (Shift+X for fine control)
+- `T`: Adjust agent turn speed (Shift+T for fine control)
+- `A`: Adjust agent sensor angle (Shift+A for fine control)
+- `D`: Adjust agent sensor distance (Shift+D for fine control)
+- `G`: Cycle through LUTs (Shift+G for reverse)
+- `F`: Toggle LUT reversal
+- `C`: Clear trail map
+- `/`: Toggle help text
+- `Esc`: Exit
 
 ## License
 

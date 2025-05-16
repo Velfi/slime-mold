@@ -18,3 +18,4 @@ pollster = "0.4.0"
 rand = { version = "0.9.1", features = ["small_rng"] }
 wgpu = { version = "0.20.0" }
 winit = "0.29.0"
+winit_input_helper = "0.16.0"

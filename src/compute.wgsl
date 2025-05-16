@@ -1,6 +1,8 @@
 // Compute shader for Physarum simulation
 // Each agent is represented by a vec4<f32>: x, y, angle, speed
 
+const TAU: f32 = 6.28318530718; // 2π
+
 @group(0) @binding(0)
 var<storage, read_write> agents: array<vec4<f32>>;
 
@@ -40,6 +42,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var y = agent.y;
     var angle = agent.z;
     var speed = agent.w;
+
+    // Ensure speed stays within bounds
+    speed = clamp(speed, sim_size.agent_speed_min, sim_size.agent_speed_max);
 
     // Calculate sensor positions
     let sensor_angle_left = angle - sim_size.agent_sensor_angle;
@@ -83,9 +88,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     if (center_value > left_value && center_value > right_value) {
         // Continue straight
     } else if (left_value > right_value) {
-        angle -= sim_size.agent_turn_speed;
+        // Calculate shortest path to turn left
+        let target_angle = angle - TAU;
+        let angle_diff = target_angle - angle;
+        angle += min(sim_size.agent_turn_speed, abs(angle_diff)) * sign(angle_diff);
     } else if (right_value > left_value) {
-        angle += sim_size.agent_turn_speed;
+        // Calculate shortest path to turn right
+        let target_angle = angle + TAU;
+        let angle_diff = target_angle - angle;
+        angle += min(sim_size.agent_turn_speed, abs(angle_diff)) * sign(angle_diff);
     } else {
         // If equal, do nothing
     }
@@ -95,6 +106,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Create a more independent random value using agent index and time
     let random_val = fract(sin(f32(agent_index) * 12.9898 + x * 78.233 + y * 37.719) * 43758.5453);
     angle += (random_val * 2.0 - 1.0) * jitter_strength * 0.01;
+
+    // Normalize angle to 0-2π range
+    angle = angle % (2.0 * 3.14159265359);
+    if (angle < 0.0) { angle = angle + 2.0 * 3.14159265359; }
 
     // Update agent position
     let move_dist = speed * TIME_STEP;
@@ -144,29 +159,30 @@ fn diffuse_trail(@builtin(global_invocation_id) id: vec3<u32>) {
     let idx = y * i32(sim_size.width) + x;
     let diffusion_rate = clamp(sim_size.diffusion_rate, 0.0, 1.0);
     
-    // Get neighboring values
-    var sum = trail_map[idx];
-    var count = 1.0;
+    // Box blur using 3x3 neighborhood
+    var sum = 0.0;
+    var count = 0.0;
     
-    // Check and add values from neighboring cells
-    if (x > 0) {
-        sum += trail_map[idx - 1];
-        count += 1.0;
-    }
-    if (x < i32(sim_size.width) - 1) {
-        sum += trail_map[idx + 1];
-        count += 1.0;
-    }
-    if (y > 0) {
-        sum += trail_map[idx - i32(sim_size.width)];
-        count += 1.0;
-    }
-    if (y < i32(sim_size.height) - 1) {
-        sum += trail_map[idx + i32(sim_size.width)];
-        count += 1.0;
+    // Check all neighbors in 3x3 grid
+    for (var dy = -1; dy <= 1; dy++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let nx = x + dx;
+            let ny = y + dy;
+            
+            // Skip if out of bounds
+            if (nx < 0 || nx >= i32(sim_size.width) || ny < 0 || ny >= i32(sim_size.height)) {
+                continue;
+            }
+            
+            let sample_idx = ny * i32(sim_size.width) + nx;
+            sum += trail_map[sample_idx];
+            count += 1.0;
+        }
     }
     
-    // Calculate average and apply diffusion
-    let avg = sum / count;
-    trail_map[idx] = mix(trail_map[idx], avg, diffusion_rate);
+    // Apply diffusion if we have valid neighbors
+    if (count > 0.0) {
+        let avg_value = sum / count;
+        trail_map[idx] = mix(trail_map[idx], avg_value, diffusion_rate);
+    }
 } 

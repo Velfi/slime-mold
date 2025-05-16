@@ -9,11 +9,12 @@ use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 use wgpu::{Backends, Buffer, BufferUsages, Device, Instance, Queue, TextureUsages};
 use winit::{
-    event::{ElementState, Event, WindowEvent},
+    event::{Event, WindowEvent},
     event_loop::EventLoop,
-    keyboard::{KeyCode, PhysicalKey},
+    keyboard::KeyCode,
     window::WindowBuilder,
 };
+use winit_input_helper::WinitInputHelper;
 
 mod bind_group_manager;
 mod pipeline_manager;
@@ -39,6 +40,8 @@ struct SimSizeUniform {
     agent_sensor_distance: f32,
     diffusion_rate: f32,
     pheromone_deposition_amount: f32,
+    blur_radius: f32,
+    blur_sigma: f32,
     _pad: [u32; 1],
 }
 
@@ -56,6 +59,8 @@ impl SimSizeUniform {
             agent_sensor_distance: settings.agent_sensor_distance,
             diffusion_rate: settings.pheromone_diffusion_rate,
             pheromone_deposition_amount: settings.pheromone_deposition_amount,
+            blur_radius: settings.blur_radius,
+            blur_sigma: settings.blur_sigma,
             _pad: [0],
         }
     }
@@ -82,7 +87,6 @@ fn update_settings(
     queue: &Queue,
     physical_width: u32,
     physical_height: u32,
-    _decay_factor: f32, // Rename to indicate it's not used
 ) {
     *current_preset_name = "CUSTOM".to_string();
     let sim_size_uniform = SimSizeUniform::new(
@@ -126,7 +130,7 @@ fn reassign_agent_speeds(
         receiver.recv().unwrap().unwrap();
         let agent_data = agent_slice.get_mapped_range();
         let mut agents: Vec<f32> = bytemuck::cast_slice(&agent_data).to_vec();
-        
+
         // Reassign speeds
         let speed_range = speed_max - speed_min;
         for i in 0..agent_count {
@@ -134,7 +138,7 @@ fn reassign_agent_speeds(
             agents[offset + 3] = speed_min + rand::random::<f32>() * speed_range;
         }
         drop(agent_data);
-        
+
         // Write back
         queue.write_buffer(agent_buffer, 0, bytemuck::cast_slice(&agents));
     }
@@ -142,6 +146,7 @@ fn reassign_agent_speeds(
 
 fn main() {
     let mut settings = Settings::default();
+    let mut input = WinitInputHelper::new();
 
     // Initialize preset manager
     let preset_manager = init_preset_manager();
@@ -152,8 +157,8 @@ fn main() {
     let available_luts = lut_manager.get_available_luts();
     let mut current_lut_index = available_luts
         .iter()
-        .position(|name| name == "MATPLOTLIB_Grays_r")
-        .expect("MATPLOTLIB_Grays_r LUT not found");
+        .position(|name| name == "MATPLOTLIB_bone_r")
+        .expect("MATPLOTLIB_bone_r LUT not found");
 
     // Load initial LUT
     let lut_data = lut_manager
@@ -176,30 +181,6 @@ fn main() {
         .build(&event_loop)
         .unwrap();
 
-    // Track shift key state
-    let mut shift_pressed = false;
-    // Track T key state
-    let mut t_pressed = false;
-    // Track J key state
-    let mut j_pressed = false;
-    // Track S key state for speed
-    let mut s_pressed = false;
-    // Track X key state for max speed
-    let mut x_pressed = false;
-    // Track A key state for sensor angle
-    let mut a_pressed = false;
-    // Track D key state for sensor distance
-    let mut d_pressed = false;
-    // Track R key state for deposition amount
-    let mut r_pressed = false;
-    // Track V key state for decay factor
-    let mut v_pressed = false;
-    // Track B key state for diffusion rate
-    let mut b_pressed = false;
-    // Track N key state for agent count
-    let mut n_pressed = false;
-    // Track P key state to prevent holding
-    let mut p_pressed = false;
     // Track if LUT is currently reversed
     let mut lut_reversed = false;
 
@@ -235,7 +216,7 @@ fn main() {
             label: None,
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits {
-                max_buffer_size: u32::MAX as u64, 
+                max_buffer_size: u32::MAX as u64,
                 max_storage_buffer_binding_size: u32::MAX,
                 ..wgpu::Limits::default()
             },
@@ -410,808 +391,533 @@ fn main() {
         .run(move |event, target| {
             let window = &window_for_event;
             target.set_control_flow(winit::event_loop::ControlFlow::Poll);
+
+            // Update input helper
+            if input.update(&event) {
+                // Handle keyboard input
+                if input.key_pressed(KeyCode::Escape) {
+                    target.exit();
+                }
+
+                // Handle modifier keys
+                let shift_pressed =
+                    input.key_held(KeyCode::ShiftLeft) || input.key_held(KeyCode::ShiftRight);
+
+                // Handle key combinations for settings adjustment
+                if input.key_held(KeyCode::KeyT) {
+                    if input.key_pressed(KeyCode::ArrowUp) {
+                        let increment = if shift_pressed { 0.01 } else { 0.1 };
+                        settings.agent_turn_speed =
+                            (settings.agent_turn_speed + increment).min(6.283_185_5);
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    } else if input.key_pressed(KeyCode::ArrowDown) {
+                        let decrement = if shift_pressed { 0.01 } else { 0.1 };
+                        settings.agent_turn_speed =
+                            (settings.agent_turn_speed - decrement).max(0.0);
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    }
+                }
+
+                if input.key_held(KeyCode::KeyJ) {
+                    if input.key_pressed(KeyCode::ArrowUp) {
+                        let increment = if shift_pressed { 0.01 } else { 0.1 };
+                        settings.agent_jitter += increment;
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    } else if input.key_pressed(KeyCode::ArrowDown) {
+                        let decrement = if shift_pressed { 0.01 } else { 0.1 };
+                        settings.agent_jitter = (settings.agent_jitter - decrement).max(0.0);
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    }
+                }
+
+                if input.key_held(KeyCode::KeyS) {
+                    if input.key_pressed(KeyCode::ArrowUp) {
+                        let increment = if shift_pressed { 1.0 } else { 5.0 };
+                        settings.agent_speed_min += increment;
+                        reassign_agent_speeds(
+                            &agent_buffer,
+                            &device,
+                            &queue,
+                            settings.agent_count,
+                            settings.agent_speed_min,
+                            settings.agent_speed_max,
+                        );
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    } else if input.key_pressed(KeyCode::ArrowDown) {
+                        let decrement = if shift_pressed { 1.0 } else { 5.0 };
+                        settings.agent_speed_min = (settings.agent_speed_min - decrement).max(0.0);
+                        reassign_agent_speeds(
+                            &agent_buffer,
+                            &device,
+                            &queue,
+                            settings.agent_count,
+                            settings.agent_speed_min,
+                            settings.agent_speed_max,
+                        );
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    }
+                }
+
+                if input.key_held(KeyCode::KeyX) {
+                    if input.key_pressed(KeyCode::ArrowUp) {
+                        let increment = if shift_pressed { 1.0 } else { 5.0 };
+                        settings.agent_speed_max += increment;
+                        reassign_agent_speeds(
+                            &agent_buffer,
+                            &device,
+                            &queue,
+                            settings.agent_count,
+                            settings.agent_speed_min,
+                            settings.agent_speed_max,
+                        );
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    } else if input.key_pressed(KeyCode::ArrowDown) {
+                        let decrement = if shift_pressed { 1.0 } else { 5.0 };
+                        settings.agent_speed_max =
+                            (settings.agent_speed_max - decrement).max(settings.agent_speed_min);
+                        reassign_agent_speeds(
+                            &agent_buffer,
+                            &device,
+                            &queue,
+                            settings.agent_count,
+                            settings.agent_speed_min,
+                            settings.agent_speed_max,
+                        );
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    }
+                }
+
+                if input.key_held(KeyCode::KeyA) {
+                    if input.key_pressed(KeyCode::ArrowUp) {
+                        let increment = if shift_pressed { 0.01 } else { 0.1 };
+                        settings.agent_sensor_angle += increment;
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    } else if input.key_pressed(KeyCode::ArrowDown) {
+                        let decrement = if shift_pressed { 0.01 } else { 0.1 };
+                        settings.agent_sensor_angle =
+                            (settings.agent_sensor_angle - decrement).max(0.0);
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    }
+                }
+
+                if input.key_held(KeyCode::KeyD) {
+                    if input.key_pressed(KeyCode::ArrowUp) {
+                        let increment = if shift_pressed { 1.0 } else { 5.0 };
+                        settings.agent_sensor_distance += increment;
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    } else if input.key_pressed(KeyCode::ArrowDown) {
+                        let decrement = if shift_pressed { 1.0 } else { 5.0 };
+                        settings.agent_sensor_distance =
+                            (settings.agent_sensor_distance - decrement).max(0.0);
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    }
+                }
+
+                if input.key_held(KeyCode::KeyR) {
+                    if input.key_pressed(KeyCode::ArrowUp) {
+                        let increment = if shift_pressed { 0.1 } else { 1.0 };
+                        settings.pheromone_deposition_amount += increment;
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    } else if input.key_pressed(KeyCode::ArrowDown) {
+                        let decrement = if shift_pressed { 0.1 } else { 1.0 };
+                        settings.pheromone_deposition_amount =
+                            (settings.pheromone_deposition_amount - decrement).max(0.0);
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    }
+                }
+
+                if input.key_held(KeyCode::KeyV) {
+                    if input.key_pressed(KeyCode::ArrowUp) {
+                        let increment = if shift_pressed { 0.1 } else { 1.0 };
+                        settings.pheromone_decay_factor += increment;
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    } else if input.key_pressed(KeyCode::ArrowDown) {
+                        let decrement = if shift_pressed { 0.1 } else { 1.0 };
+                        settings.pheromone_decay_factor =
+                            (settings.pheromone_decay_factor - decrement).max(0.0);
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    }
+                }
+
+                if input.key_held(KeyCode::KeyB) {
+                    if input.key_pressed(KeyCode::ArrowUp) {
+                        let increment = if shift_pressed { 0.01 } else { 0.1 };
+                        settings.pheromone_diffusion_rate =
+                            (settings.pheromone_diffusion_rate + increment).min(1.0);
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    } else if input.key_pressed(KeyCode::ArrowDown) {
+                        let decrement = if shift_pressed { 0.01 } else { 0.1 };
+                        settings.pheromone_diffusion_rate =
+                            (settings.pheromone_diffusion_rate - decrement).max(0.0);
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    }
+                }
+
+                if input.key_held(KeyCode::KeyN) {
+                    if input.key_pressed(KeyCode::ArrowUp) {
+                        let increment = if shift_pressed { 100_000 } else { 1_000_000 };
+                        settings.agent_count += increment;
+                        // Resize agent buffer
+                        let agent_buf_size =
+                            (settings.agent_count * 4 * std::mem::size_of::<f32>()) as u64;
+                        let new_agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("Agent Buffer"),
+                            size: agent_buf_size,
+                            usage: BufferUsages::STORAGE
+                                | BufferUsages::COPY_SRC
+                                | BufferUsages::COPY_DST,
+                            mapped_at_creation: true,
+                        });
+                        // Initialize new agents with random positions and angles
+                        {
+                            let mut agent_data = new_agent_buffer.slice(..).get_mapped_range_mut();
+                            let agent_f32: &mut [f32] = cast_slice_mut(&mut agent_data);
+                            for i in 0..settings.agent_count {
+                                let offset = i * 4;
+                                agent_f32[offset] = rand::random::<f32>() * physical_width as f32;
+                                agent_f32[offset + 1] =
+                                    rand::random::<f32>() * physical_height as f32;
+                                agent_f32[offset + 2] =
+                                    rand::random::<f32>() * 2.0 * std::f32::consts::PI;
+                                let speed_range =
+                                    settings.agent_speed_max - settings.agent_speed_min;
+                                agent_f32[offset + 3] =
+                                    settings.agent_speed_min + rand::random::<f32>() * speed_range;
+                            }
+                        }
+                        new_agent_buffer.unmap();
+
+                        // Update bind groups with new agent buffer
+                        bind_group_manager.update_compute_bind_group(
+                            &device,
+                            &pipeline_manager.compute_bind_group_layout,
+                            &new_agent_buffer,
+                            &trail_map_buffer,
+                            &sim_size_buffer,
+                        );
+
+                        // Replace old buffer with new one
+                        agent_buffer = new_agent_buffer;
+
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    } else if input.key_pressed(KeyCode::ArrowDown) {
+                        let decrement = if shift_pressed { 100_000 } else { 1_000_000 };
+                        settings.agent_count =
+                            (settings.agent_count.saturating_sub(decrement)).max(1);
+                        // Resize agent buffer
+                        let agent_buf_size =
+                            (settings.agent_count * 4 * std::mem::size_of::<f32>()) as u64;
+                        let new_agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("Agent Buffer"),
+                            size: agent_buf_size,
+                            usage: BufferUsages::STORAGE
+                                | BufferUsages::COPY_SRC
+                                | BufferUsages::COPY_DST,
+                            mapped_at_creation: true,
+                        });
+                        // Initialize new agents with random positions and angles
+                        {
+                            let mut agent_data = new_agent_buffer.slice(..).get_mapped_range_mut();
+                            let agent_f32: &mut [f32] = cast_slice_mut(&mut agent_data);
+                            for i in 0..settings.agent_count {
+                                let offset = i * 4;
+                                agent_f32[offset] = rand::random::<f32>() * physical_width as f32;
+                                agent_f32[offset + 1] =
+                                    rand::random::<f32>() * physical_height as f32;
+                                agent_f32[offset + 2] =
+                                    rand::random::<f32>() * 2.0 * std::f32::consts::PI;
+                                let speed_range =
+                                    settings.agent_speed_max - settings.agent_speed_min;
+                                agent_f32[offset + 3] =
+                                    settings.agent_speed_min + rand::random::<f32>() * speed_range;
+                            }
+                        }
+                        new_agent_buffer.unmap();
+
+                        // Update bind groups with new agent buffer
+                        bind_group_manager.update_compute_bind_group(
+                            &device,
+                            &pipeline_manager.compute_bind_group_layout,
+                            &new_agent_buffer,
+                            &trail_map_buffer,
+                            &sim_size_buffer,
+                        );
+
+                        // Replace old buffer with new one
+                        agent_buffer = new_agent_buffer;
+
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    }
+                }
+
+                // Handle preset cycling
+                if input.key_pressed(KeyCode::KeyP) {
+                    // Get all preset names from the preset manager
+                    let preset_names = preset_manager.get_preset_names();
+
+                    // Find current index
+                    let current_index = preset_names
+                        .iter()
+                        .position(|name| name == &current_preset_name)
+                        .unwrap_or(0);
+
+                    // Calculate new index
+                    let new_index = if shift_pressed {
+                        if current_index == 0 {
+                            preset_names.len() - 1
+                        } else {
+                            current_index - 1
+                        }
+                    } else {
+                        (current_index + 1) % preset_names.len()
+                    };
+
+                    // Apply new preset
+                    if let Some(preset) = preset_manager.get_preset(&preset_names[new_index]) {
+                        settings = preset.settings.clone();
+                        current_preset_name = preset.name.clone();
+
+                        // Update uniform buffer with new settings
+                        let sim_size_uniform = SimSizeUniform::new(
+                            physical_width,
+                            physical_height,
+                            settings.pheromone_decay_factor,
+                            &settings,
+                        );
+                        queue.write_buffer(
+                            &sim_size_buffer,
+                            0,
+                            bytemuck::bytes_of(&sim_size_uniform),
+                        );
+                    }
+                }
+
+                // Handle LUT cycling
+                if input.key_pressed(KeyCode::KeyG) {
+                    if shift_pressed {
+                        if current_lut_index == 0 {
+                            current_lut_index = available_luts.len() - 1;
+                        } else {
+                            current_lut_index -= 1;
+                        }
+                    } else {
+                        current_lut_index = (current_lut_index + 1) % available_luts.len();
+                    }
+
+                    let mut lut_data = lut_manager
+                        .load_lut(&available_luts[current_lut_index])
+                        .expect("Failed to load LUT");
+
+                    if lut_reversed {
+                        lut_data.reverse();
+                    }
+
+                    let mut lut_data_combined = Vec::with_capacity(768);
+                    lut_data_combined.extend_from_slice(&lut_data.red);
+                    lut_data_combined.extend_from_slice(&lut_data.green);
+                    lut_data_combined.extend_from_slice(&lut_data.blue);
+                    let lut_data_u32: Vec<u32> =
+                        lut_data_combined.iter().map(|&x| x as u32).collect();
+                    queue.write_buffer(&lut_buffer, 0, bytemuck::cast_slice(&lut_data_u32));
+
+                    window.set_title(&format!(
+                        "Physarum Simulation - LUT: {}{}",
+                        available_luts[current_lut_index],
+                        if lut_reversed { " (Reversed)" } else { "" }
+                    ));
+                    last_lut_update = Instant::now();
+                }
+
+                // Handle LUT reversal (changed from R to F)
+                if input.key_pressed(KeyCode::KeyF) {
+                    let mut lut_data = lut_manager
+                        .load_lut(&available_luts[current_lut_index])
+                        .expect("Failed to load LUT");
+
+                    if lut_reversed {
+                        lut_data = lut_manager
+                            .load_lut(&available_luts[current_lut_index])
+                            .expect("Failed to load LUT");
+                    } else {
+                        lut_data.reverse();
+                    }
+
+                    lut_reversed = !lut_reversed;
+
+                    let mut lut_data_combined = Vec::with_capacity(768);
+                    lut_data_combined.extend_from_slice(&lut_data.red);
+                    lut_data_combined.extend_from_slice(&lut_data.green);
+                    lut_data_combined.extend_from_slice(&lut_data.blue);
+                    let lut_data_u32: Vec<u32> =
+                        lut_data_combined.iter().map(|&x| x as u32).collect();
+                    queue.write_buffer(&lut_buffer, 0, bytemuck::cast_slice(&lut_data_u32));
+
+                    window.set_title(&format!(
+                        "Physarum Simulation - LUT: {}{}",
+                        available_luts[current_lut_index],
+                        if lut_reversed { " (Reversed)" } else { "" }
+                    ));
+                    last_lut_update = Instant::now();
+                }
+
+                // Handle help text toggle
+                if input.key_pressed(KeyCode::Slash) {
+                    text_renderer.toggle_visibility();
+                }
+
+                // Handle trail map clear
+                if input.key_pressed(KeyCode::KeyC) {
+                    let trail_map_size = (physical_width * physical_height) as usize;
+                    let clear_buffer = vec![0.0f32; trail_map_size];
+                    queue.write_buffer(&trail_map_buffer, 0, bytemuck::cast_slice(&clear_buffer));
+                }
+            }
+
             match event {
                 Event::WindowEvent {
                     event: WindowEvent::CloseRequested,
                     ..
                 } => target.exit(),
-                Event::WindowEvent {
-                    event:
-                        WindowEvent::KeyboardInput {
-                            event:
-                                winit::event::KeyEvent {
-                                    state,
-                                    physical_key:
-                                        PhysicalKey::Code(KeyCode::ShiftLeft | KeyCode::ShiftRight),
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                } => {
-                    shift_pressed = state == ElementState::Pressed;
-                }
-                Event::WindowEvent {
-                    event:
-                        WindowEvent::KeyboardInput {
-                            event:
-                                winit::event::KeyEvent {
-                                    state,
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyT),
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                } => {
-                    t_pressed = state == ElementState::Pressed;
-                }
-                Event::WindowEvent {
-                    event:
-                        WindowEvent::KeyboardInput {
-                            event:
-                                winit::event::KeyEvent {
-                                    state,
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyJ),
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                } => {
-                    j_pressed = state == ElementState::Pressed;
-                }
-                Event::WindowEvent {
-                    event:
-                        WindowEvent::KeyboardInput {
-                            event:
-                                winit::event::KeyEvent {
-                                    state,
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyS),
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                } => {
-                    s_pressed = state == ElementState::Pressed;
-                }
-                Event::WindowEvent {
-                    event:
-                        WindowEvent::KeyboardInput {
-                            event:
-                                winit::event::KeyEvent {
-                                    state,
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyX),
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                } => {
-                    x_pressed = state == ElementState::Pressed;
-                }
-                Event::WindowEvent {
-                    event:
-                        WindowEvent::KeyboardInput {
-                            event:
-                                winit::event::KeyEvent {
-                                    state,
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyA),
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                } => {
-                    a_pressed = state == ElementState::Pressed;
-                }
-                Event::WindowEvent {
-                    event:
-                        WindowEvent::KeyboardInput {
-                            event:
-                                winit::event::KeyEvent {
-                                    state,
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyD),
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                } => {
-                    d_pressed = state == ElementState::Pressed;
-                }
-                Event::WindowEvent {
-                    event:
-                        WindowEvent::KeyboardInput {
-                            event:
-                                winit::event::KeyEvent {
-                                    state,
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyF),
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                } => {
-                    if state == ElementState::Pressed {
-                        // LUT reversal logic
-                        let mut lut_data = lut_manager
-                            .load_lut(&available_luts[current_lut_index])
-                            .expect("Failed to load LUT");
-                        if lut_reversed {
-                            lut_data = lut_manager
-                                .load_lut(&available_luts[current_lut_index])
-                                .expect("Failed to load LUT");
-                        } else {
-                            lut_data.reverse();
-                        }
-                        lut_reversed = !lut_reversed;
-                        let mut lut_data_combined = Vec::with_capacity(768);
-                        lut_data_combined.extend_from_slice(&lut_data.red);
-                        lut_data_combined.extend_from_slice(&lut_data.green);
-                        lut_data_combined.extend_from_slice(&lut_data.blue);
-                        let lut_data_u32: Vec<u32> =
-                            lut_data_combined.iter().map(|&x| x as u32).collect();
-                        queue.write_buffer(
-                            &lut_buffer,
-                            0,
-                            bytemuck::cast_slice(&lut_data_u32),
-                        );
-                        window.set_title(&format!(
-                            "Physarum Simulation - LUT: {}{}",
-                            available_luts[current_lut_index],
-                            if lut_reversed { " (Reversed)" } else { "" }
-                        ));
-                        last_lut_update = Instant::now();
-                    }
-                }
-                Event::WindowEvent {
-                    event:
-                        WindowEvent::KeyboardInput {
-                            event:
-                                winit::event::KeyEvent {
-                                    state,
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyR),
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                } => {
-                    r_pressed = state == ElementState::Pressed;
-                }
-                Event::WindowEvent {
-                    event:
-                        WindowEvent::KeyboardInput {
-                            event:
-                                winit::event::KeyEvent {
-                                    state,
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyV),
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                } => {
-                    v_pressed = state == ElementState::Pressed;
-                }
-                Event::WindowEvent {
-                    event:
-                        WindowEvent::KeyboardInput {
-                            event:
-                                winit::event::KeyEvent {
-                                    state,
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyB),
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                } => {
-                    b_pressed = state == ElementState::Pressed;
-                }
-                Event::WindowEvent {
-                    event:
-                        WindowEvent::KeyboardInput {
-                            event:
-                                winit::event::KeyEvent {
-                                    state,
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyN),
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                } => {
-                    n_pressed = state == ElementState::Pressed;
-                }
-                Event::WindowEvent {
-                    event:
-                        WindowEvent::KeyboardInput {
-                            event:
-                                winit::event::KeyEvent {
-                                    state,
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyP),
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                } => {
-                    if state == ElementState::Pressed && !p_pressed {
-                        p_pressed = true;
-                        // Get all preset names from the preset manager
-                        let preset_names = preset_manager.get_preset_names();
-
-                        // Find current index
-                        let current_index = preset_names
-                            .iter()
-                            .position(|name| name == &current_preset_name)
-                            .unwrap_or(0);
-
-                        // Calculate new index
-                        let new_index = if shift_pressed {
-                            if current_index == 0 {
-                                preset_names.len() - 1
-                            } else {
-                                current_index - 1
-                            }
-                        } else {
-                            (current_index + 1) % preset_names.len()
-                        };
-
-                        // Apply new preset
-                        if let Some(preset) = preset_manager.get_preset(&preset_names[new_index]) {
-                            settings = preset.settings.clone();
-                            current_preset_name = preset.name.clone();
-
-                            // Update uniform buffer with new settings
-                            let sim_size_uniform = SimSizeUniform::new(
-                                physical_width,
-                                physical_height,
-                                settings.pheromone_decay_factor,
-                                &settings,
-                            );
-                            queue.write_buffer(
-                                &sim_size_buffer,
-                                0,
-                                bytemuck::bytes_of(&sim_size_uniform),
-                            );
-                        }
-                    } else if state == ElementState::Released {
-                        p_pressed = false;
-                    }
-                }
-                Event::WindowEvent {
-                    event:
-                        WindowEvent::KeyboardInput {
-                            event:
-                                winit::event::KeyEvent {
-                                    state: ElementState::Pressed,
-                                    physical_key,
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                } => {
-                    if t_pressed {
-                        match physical_key {
-                            PhysicalKey::Code(KeyCode::ArrowUp) => {
-                                let increment = if shift_pressed { 0.01 } else { 0.1 };
-                                settings.agent_turn_speed += increment;
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            PhysicalKey::Code(KeyCode::ArrowDown) => {
-                                let decrement = if shift_pressed { 0.01 } else { 0.1 };
-                                settings.agent_turn_speed =
-                                    (settings.agent_turn_speed - decrement).max(0.0);
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            _ => {}
-                        }
-                    } else if j_pressed {
-                        match physical_key {
-                            PhysicalKey::Code(KeyCode::ArrowUp) => {
-                                let increment = if shift_pressed { 0.01 } else { 0.1 };
-                                settings.agent_jitter += increment;
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            PhysicalKey::Code(KeyCode::ArrowDown) => {
-                                let decrement = if shift_pressed { 0.01 } else { 0.1 };
-                                settings.agent_jitter =
-                                    (settings.agent_jitter - decrement).max(0.0);
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            _ => {}
-                        }
-                    } else if s_pressed {
-                        match physical_key {
-                            PhysicalKey::Code(KeyCode::ArrowUp) => {
-                                let increment = if shift_pressed { 1.0 } else { 5.0 };
-                                settings.agent_speed_min += increment;
-                                reassign_agent_speeds(
-                                    &agent_buffer,
-                                    &device,
-                                    &queue,
-                                    settings.agent_count,
-                                    settings.agent_speed_min,
-                                    settings.agent_speed_max,
-                                );
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            PhysicalKey::Code(KeyCode::ArrowDown) => {
-                                let decrement = if shift_pressed { 1.0 } else { 5.0 };
-                                settings.agent_speed_min = (settings.agent_speed_min - decrement).max(0.0);
-                                reassign_agent_speeds(
-                                    &agent_buffer,
-                                    &device,
-                                    &queue,
-                                    settings.agent_count,
-                                    settings.agent_speed_min,
-                                    settings.agent_speed_max,
-                                );
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            _ => {}
-                        }
-                    } else if x_pressed {
-                        match physical_key {
-                            PhysicalKey::Code(KeyCode::ArrowUp) => {
-                                let increment = if shift_pressed { 1.0 } else { 5.0 };
-                                settings.agent_speed_max += increment;
-                                reassign_agent_speeds(
-                                    &agent_buffer,
-                                    &device,
-                                    &queue,
-                                    settings.agent_count,
-                                    settings.agent_speed_min,
-                                    settings.agent_speed_max,
-                                );
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            PhysicalKey::Code(KeyCode::ArrowDown) => {
-                                let decrement = if shift_pressed { 1.0 } else { 5.0 };
-                                settings.agent_speed_max = (settings.agent_speed_max - decrement).max(settings.agent_speed_min);
-                                reassign_agent_speeds(
-                                    &agent_buffer,
-                                    &device,
-                                    &queue,
-                                    settings.agent_count,
-                                    settings.agent_speed_min,
-                                    settings.agent_speed_max,
-                                );
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            _ => {}
-                        }
-                    } else if a_pressed {
-                        match physical_key {
-                            PhysicalKey::Code(KeyCode::ArrowUp) => {
-                                let increment = if shift_pressed { 0.01 } else { 0.1 };
-                                settings.agent_sensor_angle += increment;
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            PhysicalKey::Code(KeyCode::ArrowDown) => {
-                                let decrement = if shift_pressed { 0.01 } else { 0.1 };
-                                settings.agent_sensor_angle =
-                                    (settings.agent_sensor_angle - decrement).max(0.0);
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            _ => {}
-                        }
-                    } else if d_pressed {
-                        match physical_key {
-                            PhysicalKey::Code(KeyCode::ArrowUp) => {
-                                let increment = if shift_pressed { 1.0 } else { 5.0 };
-                                settings.agent_sensor_distance += increment;
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            PhysicalKey::Code(KeyCode::ArrowDown) => {
-                                let decrement = if shift_pressed { 1.0 } else { 5.0 };
-                                settings.agent_sensor_distance =
-                                    (settings.agent_sensor_distance - decrement).max(0.0);
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            _ => {}
-                        }
-                    } else if r_pressed {
-                        match physical_key {
-                            PhysicalKey::Code(KeyCode::ArrowUp) => {
-                                let increment = if shift_pressed { 0.1 } else { 1.0 };
-                                settings.pheromone_deposition_amount += increment;
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            PhysicalKey::Code(KeyCode::ArrowDown) => {
-                                let decrement = if shift_pressed { 0.1 } else { 1.0 };
-                                settings.pheromone_deposition_amount =
-                                    (settings.pheromone_deposition_amount - decrement).max(0.0);
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            _ => {}
-                        }
-                    } else if v_pressed {
-                        match physical_key {
-                            PhysicalKey::Code(KeyCode::ArrowUp) => {
-                                let increment = if shift_pressed { 0.1 } else { 1.0 };
-                                settings.pheromone_decay_factor += increment;
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            PhysicalKey::Code(KeyCode::ArrowDown) => {
-                                let decrement = if shift_pressed { 0.1 } else { 1.0 };
-                                settings.pheromone_decay_factor =
-                                    (settings.pheromone_decay_factor - decrement).max(0.0);
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            _ => {}
-                        }
-                    } else if b_pressed {
-                        match physical_key {
-                            PhysicalKey::Code(KeyCode::ArrowUp) => {
-                                let increment = if shift_pressed { 0.01 } else { 0.1 };
-                                settings.pheromone_diffusion_rate = (settings.pheromone_diffusion_rate + increment).min(1.0);
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            PhysicalKey::Code(KeyCode::ArrowDown) => {
-                                let decrement = if shift_pressed { 0.01 } else { 0.1 };
-                                settings.pheromone_diffusion_rate = (settings.pheromone_diffusion_rate - decrement).max(0.0);
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            _ => {}
-                        }
-                    } else if n_pressed {
-                        match physical_key {
-                            PhysicalKey::Code(KeyCode::ArrowUp) => {
-                                let increment = if shift_pressed { 100_000 } else { 1_000_000 };
-                                settings.agent_count += increment;
-                                // Resize agent buffer
-                                let agent_buf_size = (settings.agent_count * 4 * std::mem::size_of::<f32>()) as u64;
-                                let new_agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                                    label: Some("Agent Buffer"),
-                                    size: agent_buf_size,
-                                    usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-                                    mapped_at_creation: true,
-                                });
-                                // Initialize new agents with random positions and angles
-                                {
-                                    let mut agent_data = new_agent_buffer.slice(..).get_mapped_range_mut();
-                                    let agent_f32: &mut [f32] = cast_slice_mut(&mut agent_data);
-                                    for i in 0..settings.agent_count {
-                                        let offset = i * 4;
-                                        agent_f32[offset] = rand::random::<f32>() * physical_width as f32;
-                                        agent_f32[offset + 1] = rand::random::<f32>() * physical_height as f32;
-                                        agent_f32[offset + 2] = rand::random::<f32>() * 2.0 * std::f32::consts::PI;
-                                        let speed_range = settings.agent_speed_max - settings.agent_speed_min;
-                                        agent_f32[offset + 3] = settings.agent_speed_min + rand::random::<f32>() * speed_range;
-                                    }
-                                }
-                                new_agent_buffer.unmap();
-                                
-                                // Update bind groups with new agent buffer
-                                bind_group_manager.update_compute_bind_group(
-                                    &device,
-                                    &pipeline_manager.compute_bind_group_layout,
-                                    &new_agent_buffer,
-                                    &trail_map_buffer,
-                                    &sim_size_buffer,
-                                );
-                                
-                                // Replace old buffer with new one
-                                agent_buffer = new_agent_buffer;
-                                
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            PhysicalKey::Code(KeyCode::ArrowDown) => {
-                                let decrement = if shift_pressed { 100_000 } else { 1_000_000 };
-                                settings.agent_count = (settings.agent_count.saturating_sub(decrement)).max(1);
-                                // Resize agent buffer
-                                let agent_buf_size = (settings.agent_count * 4 * std::mem::size_of::<f32>()) as u64;
-                                let new_agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                                    label: Some("Agent Buffer"),
-                                    size: agent_buf_size,
-                                    usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-                                    mapped_at_creation: true,
-                                });
-                                // Initialize new agents with random positions and angles
-                                {
-                                    let mut agent_data = new_agent_buffer.slice(..).get_mapped_range_mut();
-                                    let agent_f32: &mut [f32] = cast_slice_mut(&mut agent_data);
-                                    for i in 0..settings.agent_count {
-                                        let offset = i * 4;
-                                        agent_f32[offset] = rand::random::<f32>() * physical_width as f32;
-                                        agent_f32[offset + 1] = rand::random::<f32>() * physical_height as f32;
-                                        agent_f32[offset + 2] = rand::random::<f32>() * 2.0 * std::f32::consts::PI;
-                                        let speed_range = settings.agent_speed_max - settings.agent_speed_min;
-                                        agent_f32[offset + 3] = settings.agent_speed_min + rand::random::<f32>() * speed_range;
-                                    }
-                                }
-                                new_agent_buffer.unmap();
-                                
-                                // Update bind groups with new agent buffer
-                                bind_group_manager.update_compute_bind_group(
-                                    &device,
-                                    &pipeline_manager.compute_bind_group_layout,
-                                    &new_agent_buffer,
-                                    &trail_map_buffer,
-                                    &sim_size_buffer,
-                                );
-                                
-                                // Replace old buffer with new one
-                                agent_buffer = new_agent_buffer;
-                                
-                                update_settings(
-                                    &mut settings,
-                                    &mut current_preset_name,
-                                    &sim_size_buffer,
-                                    &queue,
-                                    physical_width,
-                                    physical_height,
-                                    decay_factor,
-                                );
-                            }
-                            _ => {}
-                        }
-                    } else {
-                        match physical_key {
-                            PhysicalKey::Code(KeyCode::Escape) => target.exit(),
-                            PhysicalKey::Code(KeyCode::KeyG) => {
-                                // Cycle LUTs (forward or backward based on shift key)
-                                if shift_pressed {
-                                    log::debug!("Cycle backwards");
-                                    // Cycle backwards
-                                    if current_lut_index == 0 {
-                                        current_lut_index = available_luts.len() - 1;
-                                    } else {
-                                        current_lut_index -= 1;
-                                    }
-                                } else {
-                                    log::debug!("Cycle forwards");
-                                    // Cycle forwards
-                                    current_lut_index =
-                                        (current_lut_index + 1) % available_luts.len();
-                                }
-
-                                // Load the new LUT data
-                                let mut lut_data = lut_manager
-                                    .load_lut(&available_luts[current_lut_index])
-                                    .expect("Failed to load LUT");
-
-                                // If currently reversed, reverse the new LUT
-                                if lut_reversed {
-                                    lut_data.reverse();
-                                }
-
-                                // Update LUT buffer
-                                let mut lut_data_combined = Vec::with_capacity(768);
-                                lut_data_combined.extend_from_slice(&lut_data.red);
-                                lut_data_combined.extend_from_slice(&lut_data.green);
-                                lut_data_combined.extend_from_slice(&lut_data.blue);
-                                let lut_data_u32: Vec<u32> =
-                                    lut_data_combined.iter().map(|&x| x as u32).collect();
-                                queue.write_buffer(
-                                    &lut_buffer,
-                                    0,
-                                    bytemuck::cast_slice(&lut_data_u32),
-                                );
-
-                                // Update window title to show current LUT
-                                window.set_title(&format!(
-                                    "Physarum Simulation - LUT: {}{}",
-                                    available_luts[current_lut_index],
-                                    if lut_reversed { " (Reversed)" } else { "" }
-                                ));
-                                last_lut_update = Instant::now();
-                            }
-                            PhysicalKey::Code(KeyCode::KeyR) => {
-                                // Toggle LUT reversal
-                                let mut lut_data = lut_manager
-                                    .load_lut(&available_luts[current_lut_index])
-                                    .expect("Failed to load LUT");
-                                
-                                if lut_reversed {
-                                    // If currently reversed, load the original LUT
-                                    lut_data = lut_manager
-                                        .load_lut(&available_luts[current_lut_index])
-                                        .expect("Failed to load LUT");
-                                } else {
-                                    // If not reversed, reverse the LUT
-                                    lut_data.reverse();
-                                }
-                                
-                                // Toggle the reversed state
-                                lut_reversed = !lut_reversed;
-
-                                // Update LUT buffer with data
-                                let mut lut_data_combined = Vec::with_capacity(768);
-                                lut_data_combined.extend_from_slice(&lut_data.red);
-                                lut_data_combined.extend_from_slice(&lut_data.green);
-                                lut_data_combined.extend_from_slice(&lut_data.blue);
-                                let lut_data_u32: Vec<u32> =
-                                    lut_data_combined.iter().map(|&x| x as u32).collect();
-                                queue.write_buffer(
-                                    &lut_buffer,
-                                    0,
-                                    bytemuck::cast_slice(&lut_data_u32),
-                                );
-
-                                // Update window title to show LUT state
-                                window.set_title(&format!(
-                                    "Physarum Simulation - LUT: {}{}",
-                                    available_luts[current_lut_index],
-                                    if lut_reversed { " (Reversed)" } else { "" }
-                                ));
-                                last_lut_update = Instant::now();
-                            }
-                            PhysicalKey::Code(KeyCode::Slash) => {
-                                text_renderer.toggle_visibility();
-                            }
-                            PhysicalKey::Code(KeyCode::KeyC) => {
-                                // Clear the trail map by creating a new buffer filled with zeros
-                                let trail_map_size = (physical_width * physical_height) as usize;
-                                let clear_buffer = vec![0.0f32; trail_map_size];
-                                queue.write_buffer(
-                                    &trail_map_buffer,
-                                    0,
-                                    bytemuck::cast_slice(&clear_buffer),
-                                );
-                            }
-                            _ => {}
-                        }
-                    }
-                }
                 Event::WindowEvent {
                     event: WindowEvent::Resized(new_size),
                     ..
@@ -1255,9 +961,10 @@ fn main() {
                             mapped_at_creation: false,
                         });
                         // Copy from agent_buffer to temp_agent_buffer
-                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("Agent Copy Encoder"),
-                        });
+                        let mut encoder =
+                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("Agent Copy Encoder"),
+                            });
                         encoder.copy_buffer_to_buffer(
                             &agent_buffer,
                             0,
@@ -1270,7 +977,8 @@ fn main() {
                         {
                             let agent_slice = temp_agent_buffer.slice(..);
                             let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-                            agent_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+                            agent_slice
+                                .map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
                             device.poll(wgpu::Maintain::Wait);
                             receiver.recv().unwrap().unwrap();
                             let agent_data = agent_slice.get_mapped_range();
@@ -1335,7 +1043,8 @@ fn main() {
                             | wgpu::TextureUsages::COPY_SRC,
                         view_formats: &[],
                     });
-                    let display_view = display_texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    let display_view =
+                        display_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
                     // Update uniform buffer with new size
                     let sim_size_uniform = SimSizeUniform::new(
@@ -1416,9 +1125,12 @@ fn main() {
                             let agent_jitter = format_float_dynamic(settings.agent_jitter);
                             let agent_speed_min = format_float_dynamic(settings.agent_speed_min);
                             let agent_speed_max = format_float_dynamic(settings.agent_speed_max);
-                            let agent_turn_speed = format_float_dynamic(settings.agent_turn_speed);
-                            let agent_sensor_angle =
-                                format_float_dynamic(settings.agent_sensor_angle * 180.0 / std::f32::consts::PI);
+                            let agent_turn_speed = format_float_dynamic(
+                                settings.agent_turn_speed * 180.0 / std::f32::consts::PI,
+                            );
+                            let agent_sensor_angle = format_float_dynamic(
+                                settings.agent_sensor_angle * 180.0 / std::f32::consts::PI,
+                            );
                             let agent_sensor_distance =
                                 format_float_dynamic(settings.agent_sensor_distance);
 
@@ -1432,13 +1144,15 @@ fn main() {
                                 (J) Jitter:\t{agent_jitter}\n\
                                 (S) Min Speed:\t{agent_speed_min}\n\
                                 (X) Max Speed:\t{agent_speed_max}\n\
-                                (T) Turn:\t{agent_turn_speed}\n\
+                                (T) Turn:\t{agent_turn_speed}°\n\
                                 (A) Angle:\t{agent_sensor_angle}°\n\
                                 (D) Distance:\t{agent_sensor_distance}\n\
                                 Press / to toggle help\n\
                                 Press C to clear trail map\n\
                                 Press G to cycle LUTs (Shift+G for reverse)\n\
-                                Hold any key + arrows to adjust its setting (Shift for fine control)",
+                                Press F to toggle LUT reversal\n\
+                                Hold any key + arrows to adjust its setting\n\
+                                Adjust with Shift held for fine control",
                             )
                         };
 
@@ -1459,8 +1173,7 @@ fn main() {
                         compute_pass.set_bind_group(0, &bind_group_manager.compute_bind_group, &[]);
                         // Split the workgroups across multiple dimensions
                         let workgroup_size = 64u32;
-                        let total_workgroups =
-                            (agent_count as u32).div_ceil(workgroup_size);
+                        let total_workgroups = (agent_count as u32).div_ceil(workgroup_size);
                         let workgroups_x = total_workgroups.min(65535);
                         let workgroups_y = total_workgroups.div_ceil(workgroups_x);
                         compute_pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
