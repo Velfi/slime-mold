@@ -19,9 +19,9 @@ struct SimSizeUniform {
     agent_turn_speed: f32,
     agent_sensor_angle: f32,
     agent_sensor_distance: f32,
+    diffusion_rate: f32,
+    pheromone_deposition_amount: f32,
     _pad1: u32,
-    _pad2: u32,
-    _pad3: u32,
 };
 
 fn get_lut_color(intensity: f32) -> vec4<f32> {

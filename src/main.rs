@@ -1,5 +1,6 @@
 use bytemuck::cast_slice_mut;
 use log::info;
+use num_format::{Locale, ToFormattedString};
 use slime::lut_manager::LutManager;
 use slime::settings::Settings;
 use std::borrow::Cow;
@@ -14,6 +15,23 @@ use winit::{
     window::WindowBuilder,
 };
 
+mod text_renderer;
+use text_renderer::TextRenderer;
+
+fn format_float_dynamic(val: f32) -> String {
+    let s = format!("{}", val);
+    if s.contains('.') {
+        let s = s.trim_end_matches('0').trim_end_matches('.');
+        if s.is_empty() {
+            "0.0".to_string()
+        } else {
+            s.to_string()
+        }
+    } else {
+        format!("{}.0", s)
+    }
+}
+
 fn main() {
     let settings = Settings::load_from_file("simulation_settings.toml")
         .expect("Failed to load settings simulation_settings.toml");
@@ -27,7 +45,7 @@ fn main() {
         .expect("MATPLOTLIB_Grays_r LUT not found");
 
     // Load initial LUT
-    let mut lut_data = lut_manager
+    let lut_data = lut_manager
         .load_lut(&available_luts[current_lut_index])
         .expect("Failed to load initial LUT");
 
@@ -84,6 +102,10 @@ fn main() {
         None,
     ))
     .unwrap();
+
+    // Wrap resources in Arc
+    let device = Arc::new(device);
+    let queue = Arc::new(queue);
 
     // Get device limits for texture size
     let max_texture_dimension = device.limits().max_texture_dimension_2d;
@@ -508,6 +530,112 @@ fn main() {
         multiview: None,
     });
 
+    // After creating the render pipeline, add:
+    let text_bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Text Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+    let text_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Text Shader"),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("text.wgsl"))),
+    });
+
+    let text_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Text Pipeline Layout"),
+        bind_group_layouts: &[&text_bind_group_layout],
+        push_constant_ranges: &[],
+    });
+
+    let text_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Text Pipeline"),
+        layout: Some(&text_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &text_shader,
+            entry_point: "vs_main",
+            buffers: &[],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &text_shader,
+            entry_point: "fs_main",
+            targets: &[Some(wgpu::ColorTargetState {
+                format: config.format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    });
+
+    // Create Arc-wrapped resources for text renderer
+    let sim_size_buffer = Arc::new(sim_size_buffer);
+    let lut_buffer = Arc::new(lut_buffer);
+
+    // Create text renderer
+    let mut text_renderer = TextRenderer::new(
+        device.clone(),
+        queue.clone(),
+        settings.window_height,
+        sim_size_buffer.clone(),
+        lut_buffer.clone(),
+    );
+
+    // Load font
+    let font_data = include_bytes!("../Texturina-VariableFont_opsz,wght.ttf");
+    let font =
+        fontdue::Font::from_bytes(font_data as &[u8], fontdue::FontSettings::default()).unwrap();
+
     // Main event loop
     let window_for_event = window.clone();
     event_loop
@@ -525,13 +653,55 @@ fn main() {
                             event:
                                 winit::event::KeyEvent {
                                     state: ElementState::Pressed,
-                                    physical_key: PhysicalKey::Code(KeyCode::Escape),
+                                    physical_key,
                                     ..
                                 },
                             ..
                         },
                     ..
-                } => target.exit(),
+                } => match physical_key {
+                    PhysicalKey::Code(KeyCode::Escape) => target.exit(),
+                    PhysicalKey::Code(KeyCode::KeyG) => {
+                        // Cycle LUTs (forward or backward based on shift key)
+                        if shift_pressed {
+                            log::debug!("Cycle backwards");
+                            // Cycle backwards
+                            if current_lut_index == 0 {
+                                current_lut_index = available_luts.len() - 1;
+                            } else {
+                                current_lut_index -= 1;
+                            }
+                        } else {
+                            log::debug!("Cycle forwards");
+                            // Cycle forwards
+                            current_lut_index = (current_lut_index + 1) % available_luts.len();
+                        }
+
+                        // Load the new LUT data
+                        let lut_data = lut_manager
+                            .load_lut(&available_luts[current_lut_index])
+                            .expect("Failed to load LUT");
+
+                        // Update LUT buffer
+                        let mut lut_data_combined = Vec::with_capacity(768);
+                        lut_data_combined.extend_from_slice(&lut_data.red);
+                        lut_data_combined.extend_from_slice(&lut_data.green);
+                        lut_data_combined.extend_from_slice(&lut_data.blue);
+                        let lut_data_u32: Vec<u32> =
+                            lut_data_combined.iter().map(|&x| x as u32).collect();
+                        queue.write_buffer(&lut_buffer, 0, bytemuck::cast_slice(&lut_data_u32));
+
+                        // Update window title to show current LUT
+                        window.set_title(&format!(
+                            "Physarum Simulation - LUT: {}",
+                            available_luts[current_lut_index]
+                        ));
+                    }
+                    PhysicalKey::Code(KeyCode::Slash) => {
+                        text_renderer.toggle_visibility();
+                    }
+                    _ => {}
+                },
                 Event::WindowEvent {
                     event:
                         WindowEvent::KeyboardInput {
@@ -547,51 +717,6 @@ fn main() {
                     ..
                 } => {
                     shift_pressed = state == ElementState::Pressed;
-                }
-                Event::WindowEvent {
-                    event:
-                        WindowEvent::KeyboardInput {
-                            event:
-                                winit::event::KeyEvent {
-                                    state: ElementState::Pressed,
-                                    physical_key: PhysicalKey::Code(KeyCode::KeyG),
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                } => {
-                    // Cycle LUTs (forward or backward based on shift key)
-                    if shift_pressed {
-                        // Cycle backwards
-                        if current_lut_index == 0 {
-                            current_lut_index = available_luts.len() - 1;
-                        } else {
-                            current_lut_index -= 1;
-                        }
-                    } else {
-                        // Cycle forwards
-                        current_lut_index = (current_lut_index + 1) % available_luts.len();
-                    }
-
-                    lut_data = lut_manager
-                        .load_lut(&available_luts[current_lut_index])
-                        .expect("Failed to load LUT");
-
-                    // Update LUT buffer
-                    let mut lut_data_combined = Vec::with_capacity(768);
-                    lut_data_combined.extend_from_slice(&lut_data.red);
-                    lut_data_combined.extend_from_slice(&lut_data.green);
-                    lut_data_combined.extend_from_slice(&lut_data.blue);
-                    let lut_data_u32: Vec<u32> =
-                        lut_data_combined.iter().map(|&x| x as u32).collect();
-                    queue.write_buffer(&lut_buffer, 0, bytemuck::cast_slice(&lut_data_u32));
-
-                    // Update window title to show current LUT
-                    window.set_title(&format!(
-                        "Physarum Simulation - LUT: {}",
-                        available_luts[current_lut_index]
-                    ));
                 }
                 Event::WindowEvent {
                     event: WindowEvent::Resized(new_size),
@@ -835,6 +960,41 @@ fn main() {
                         ));
                         frame_count = 0;
                         last_fps_update = current_time;
+
+                        // Update help text
+                        let help_text = {
+                            let decay_factor =
+                                format_float_dynamic(settings.pheromone_decay_factor);
+                            let diffusion_rate =
+                                format_float_dynamic(settings.pheromone_diffusion_rate);
+                            let deposition_amount =
+                                format_float_dynamic(settings.pheromone_deposition_amount);
+                            let agent_count = settings.agent_count.to_formatted_string(&Locale::en);
+                            let agent_jitter = format_float_dynamic(settings.agent_jitter);
+                            let agent_speed_min = format_float_dynamic(settings.agent_speed_min);
+                            let agent_speed_max = format_float_dynamic(settings.agent_speed_max);
+                            let agent_turn_speed = format_float_dynamic(settings.agent_turn_speed);
+                            let agent_sensor_angle =
+                                format_float_dynamic(settings.agent_sensor_angle);
+                            let agent_sensor_distance =
+                                format_float_dynamic(settings.agent_sensor_distance);
+
+                            format!(
+                                "FPS:\t{fps:.1} ({frame_time:.1}ms)\n\
+                                Agents:\t{agent_count}\n\
+                                Decay:\t{decay_factor}\n\
+                                Diffusion:\t{diffusion_rate}\n\
+                                Deposition:\t{deposition_amount}\n\
+                                Agent Jitter:\t{agent_jitter}\n\
+                                Speed Range:\t{agent_speed_min}-{agent_speed_max}\n\
+                                Turn Speed:\t{agent_turn_speed}\n\
+                                Sensor Angle:\t{agent_sensor_angle}\n\
+                                Sensor Distance:\t{agent_sensor_distance}\n\
+                                Press / to toggle help",
+                            )
+                        };
+
+                        text_renderer.render_text(&help_text, &font, window.inner_size());
                     }
                     last_frame_time = current_time;
 
@@ -939,8 +1099,16 @@ fn main() {
                         render_pass.set_pipeline(&render_pipeline);
                         render_pass.set_bind_group(0, &render_bind_group, &[]);
                         render_pass.draw(0..6, 0..1);
+
+                        // Draw text overlay
+                        if let Some(text_bind_group) = text_renderer.get_bind_group() {
+                            render_pass.set_pipeline(&text_pipeline);
+                            render_pass.set_bind_group(0, text_bind_group, &[]);
+                            render_pass.draw(0..6, 0..1);
+                        }
                     }
                     queue.submit(Some(encoder.finish()));
+
                     frame.present();
                 }
                 _ => {}

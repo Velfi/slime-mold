@@ -3,24 +3,24 @@
 
 # General settings
 # I'm not yet sure how I want to handle resizes
-windowWidth = 1920
-windowHeight = 1080
+windowWidth = 1600
+windowHeight = 900
 windowFullscreen = false
 
 # Agent settings
 agentCount = 10_000_000
-agentJitter = 0.1
+agentJitter = 0.0
 # Min must always be < Max
-agentSpeedMin = 60.0
-agentSpeedMax = 60.0
-agentTurnSpeed = 0.8
+agentSpeedMin = 70.0
+agentSpeedMax = 80.0
+agentTurnSpeed = 1.0
 agentSensorAngle = 0.3
 agentSensorDistance = 20.0
 
 # Pheromone settings
-pheromoneDepositionAmount = 1.0
-pheromoneDecayFactor = 10.0
-pheromoneDiffusionRate = 1.0
+pheromoneDepositionAmount = 0.001
+pheromoneDecayFactor = 1.0
+pheromoneDiffusionRate = 0.001
 
 [agentPossibleStartingHeadings]
 start = 0.0

@@ -11,9 +11,6 @@ layout(set = 0, binding = 0) uniform Uniforms {
 };
 
 void main() {
-    // Calculate pheromone deposition based on agent's position and velocity
-    float deposition = pheromone_deposition_amount * delta_time;
-    
-    // Output the pheromone deposition value
-    f_color = vec4(deposition, 0.0, 0.0, 1.0);
+    // Calculate and output deposition in one step
+    f_color = vec4(pheromone_deposition_amount * delta_time, 0.0, 0.0, 1.0);
 } 
