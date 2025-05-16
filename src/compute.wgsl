@@ -29,7 +29,8 @@ const TIME_STEP: f32 = 0.016; // Affects how far agents move per frame based on 
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let agent_index = i32(global_id.x);
+    // Calculate agent index from 2D workgroup layout
+    let agent_index = i32(global_id.x + global_id.y * 65535u);
     if (agent_index >= i32(arrayLength(&agents))) {
         return;
     }

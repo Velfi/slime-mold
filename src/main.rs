@@ -1,4 +1,6 @@
 use bytemuck::cast_slice_mut;
+use log::info;
+use slime::lut_manager::LutManager;
 use slime::settings::Settings;
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -6,8 +8,9 @@ use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
 use wgpu::{Backends, BufferUsages, Instance, TextureUsages};
 use winit::{
-    event::{Event, WindowEvent},
+    event::{ElementState, Event, WindowEvent},
     event_loop::EventLoop,
+    keyboard::{KeyCode, PhysicalKey},
     window::WindowBuilder,
 };
 
@@ -15,12 +18,37 @@ fn main() {
     let settings = Settings::load_from_file("simulation_settings.toml")
         .expect("Failed to load settings simulation_settings.toml");
 
+    // Initialize LUT manager and get available LUTs
+    let lut_manager = LutManager::new();
+    let available_luts = lut_manager.get_available_luts();
+    let mut current_lut_index = available_luts
+        .iter()
+        .position(|name| name == "MATPLOTLIB_Grays_r")
+        .expect("MATPLOTLIB_Grays_r LUT not found");
+
+    // Load initial LUT
+    let mut lut_data = lut_manager
+        .load_lut(&available_luts[current_lut_index])
+        .expect("Failed to load initial LUT");
+
     // Initialize the event loop and window
     let event_loop = EventLoop::new().unwrap();
     let window = WindowBuilder::new()
         .with_title("Physarum Simulation")
+        .with_inner_size(winit::dpi::LogicalSize::new(
+            settings.window_width,
+            settings.window_height,
+        ))
+        .with_fullscreen(if settings.window_fullscreen {
+            Some(winit::window::Fullscreen::Borderless(None))
+        } else {
+            None
+        })
         .build(&event_loop)
         .unwrap();
+
+    // Track shift key state
+    let mut shift_pressed = false;
 
     // FPS counter variables
     let mut frame_count = 0;
@@ -47,7 +75,11 @@ fn main() {
         &wgpu::DeviceDescriptor {
             label: None,
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::default(),
+            required_limits: wgpu::Limits {
+                max_buffer_size: 1024 * 1024 * 1024,                 // 1024MB
+                max_storage_buffer_binding_size: 1024 * 1024 * 1024, // 1024MB
+                ..wgpu::Limits::default()
+            },
         },
         None,
     ))
@@ -55,7 +87,7 @@ fn main() {
 
     // Get device limits for texture size
     let max_texture_dimension = device.limits().max_texture_dimension_2d;
-    println!("[info] Max texture dimension: {}", max_texture_dimension);
+    info!("Max texture dimension: {}", max_texture_dimension);
 
     // Use settings for window and simulation parameters
     let logical_width = settings.window_width;
@@ -327,8 +359,34 @@ fn main() {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
+
+    // Create LUT buffer
+    let mut lut_data_combined = Vec::with_capacity(768);
+    lut_data_combined.extend_from_slice(&lut_data.red);
+    lut_data_combined.extend_from_slice(&lut_data.green);
+    lut_data_combined.extend_from_slice(&lut_data.blue);
+
+    // Convert u8 to u32 for the shader
+    let lut_data_u32: Vec<u32> = lut_data_combined.iter().map(|&x| x as u32).collect();
+
+    let lut_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("LUT Buffer"),
+        contents: bytemuck::cast_slice(&lut_data_u32),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    });
+
     let mut display_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Display Compute Bind Group"),
         layout: &display_bind_group_layout,
@@ -344,6 +402,10 @@ fn main() {
             wgpu::BindGroupEntry {
                 binding: 2,
                 resource: sim_size_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: lut_buffer.as_entire_binding(),
             },
         ],
     });
@@ -458,6 +520,80 @@ fn main() {
                     ..
                 } => target.exit(),
                 Event::WindowEvent {
+                    event:
+                        WindowEvent::KeyboardInput {
+                            event:
+                                winit::event::KeyEvent {
+                                    state: ElementState::Pressed,
+                                    physical_key: PhysicalKey::Code(KeyCode::Escape),
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => target.exit(),
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::KeyboardInput {
+                            event:
+                                winit::event::KeyEvent {
+                                    state,
+                                    physical_key:
+                                        PhysicalKey::Code(KeyCode::ShiftLeft | KeyCode::ShiftRight),
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => {
+                    shift_pressed = state == ElementState::Pressed;
+                }
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::KeyboardInput {
+                            event:
+                                winit::event::KeyEvent {
+                                    state: ElementState::Pressed,
+                                    physical_key: PhysicalKey::Code(KeyCode::KeyG),
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => {
+                    // Cycle LUTs (forward or backward based on shift key)
+                    if shift_pressed {
+                        // Cycle backwards
+                        if current_lut_index == 0 {
+                            current_lut_index = available_luts.len() - 1;
+                        } else {
+                            current_lut_index -= 1;
+                        }
+                    } else {
+                        // Cycle forwards
+                        current_lut_index = (current_lut_index + 1) % available_luts.len();
+                    }
+
+                    lut_data = lut_manager
+                        .load_lut(&available_luts[current_lut_index])
+                        .expect("Failed to load LUT");
+
+                    // Update LUT buffer
+                    let mut lut_data_combined = Vec::with_capacity(768);
+                    lut_data_combined.extend_from_slice(&lut_data.red);
+                    lut_data_combined.extend_from_slice(&lut_data.green);
+                    lut_data_combined.extend_from_slice(&lut_data.blue);
+                    let lut_data_u32: Vec<u32> =
+                        lut_data_combined.iter().map(|&x| x as u32).collect();
+                    queue.write_buffer(&lut_buffer, 0, bytemuck::cast_slice(&lut_data_u32));
+
+                    // Update window title to show current LUT
+                    window.set_title(&format!(
+                        "Physarum Simulation - LUT: {}",
+                        available_luts[current_lut_index]
+                    ));
+                }
+                Event::WindowEvent {
                     event: WindowEvent::Resized(new_size),
                     ..
                 } => {
@@ -476,7 +612,7 @@ fn main() {
                     let physical_width = (logical_width as f64 * scale_factor) as u32;
                     let physical_height = (logical_height as f64 * scale_factor) as u32;
 
-                    println!(
+                    info!(
                         "[resize] logical size: {}x{}, physical size: {}x{}, scale factor: {}",
                         logical_width,
                         logical_height,
@@ -520,10 +656,8 @@ fn main() {
                             // Scale positions
                             for i in 0..agent_count {
                                 let offset = i * 4;
-                                agents[offset] =
-                                    agents[offset] * (physical_width as f32 / old_width as f32);
-                                agents[offset + 1] = agents[offset + 1]
-                                    * (physical_height as f32 / old_height as f32);
+                                agents[offset] *= physical_width as f32 / old_width as f32;
+                                agents[offset + 1] *= physical_height as f32 / old_height as f32;
                             }
                             drop(agent_data);
                             // Write back
@@ -602,11 +736,11 @@ fn main() {
                     // Recreate the display texture
                     let texture_width = physical_width.min(max_texture_dimension);
                     let texture_height = physical_height.min(max_texture_dimension);
-                    println!(
+                    info!(
                         "[resize] texture_width: {}, texture_height: {}, max_texture_dimension: {}",
                         texture_width, texture_height, max_texture_dimension
                     );
-                    println!(
+                    info!(
                         "[resize] display_texture size: width: {}, height: {}",
                         texture_width, texture_height
                     );
@@ -664,6 +798,10 @@ fn main() {
                                 binding: 2,
                                 resource: sim_size_buffer.as_entire_binding(),
                             },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: lut_buffer.as_entire_binding(),
+                            },
                         ],
                     });
 
@@ -711,7 +849,13 @@ fn main() {
                             });
                         compute_pass.set_pipeline(&compute_pipeline);
                         compute_pass.set_bind_group(0, &bind_group, &[]);
-                        compute_pass.dispatch_workgroups((agent_count as u32 + 63) / 64, 1, 1);
+                        // Split the workgroups across multiple dimensions
+                        let workgroup_size = 64u32;
+                        let total_workgroups =
+                            (agent_count as u32 + workgroup_size - 1) / workgroup_size;
+                        let workgroups_x = total_workgroups.min(65535);
+                        let workgroups_y = (total_workgroups + workgroups_x - 1) / workgroups_x;
+                        compute_pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
                     }
                     queue.submit(Some(encoder.finish()));
 
@@ -727,8 +871,8 @@ fn main() {
                         decay_pass.set_pipeline(&decay_pipeline);
                         decay_pass.set_bind_group(0, &bind_group, &[]);
                         let workgroup_size = 16u32;
-                        let dispatch_x = (physical_width + workgroup_size - 1) / workgroup_size;
-                        let dispatch_y = (physical_height + workgroup_size - 1) / workgroup_size;
+                        let dispatch_x = physical_width.div_ceil(workgroup_size);
+                        let dispatch_y = physical_height.div_ceil(workgroup_size);
                         decay_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
                     }
                     queue.submit(Some(encoder.finish()));
@@ -745,8 +889,8 @@ fn main() {
                         compute_pass.set_pipeline(&display_pipeline);
                         compute_pass.set_bind_group(0, &display_bind_group, &[]);
                         let workgroup_size = 16u32;
-                        let dispatch_x = (physical_width + workgroup_size - 1) / workgroup_size;
-                        let dispatch_y = (physical_height + workgroup_size - 1) / workgroup_size;
+                        let dispatch_x = physical_width.div_ceil(workgroup_size);
+                        let dispatch_y = physical_height.div_ceil(workgroup_size);
                         compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
                     }
                     queue.submit(Some(encoder.finish()));

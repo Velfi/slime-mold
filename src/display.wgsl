@@ -4,6 +4,10 @@
 var<storage, read> trail_map: array<f32>;
 @group(0) @binding(1)
 var display_tex: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2)
+var<uniform> sim_size: SimSizeUniform;
+@group(0) @binding(3)
+var<storage, read> lut_data: array<u32>;
 
 struct SimSizeUniform {
     width: u32,
@@ -19,8 +23,21 @@ struct SimSizeUniform {
     _pad2: u32,
     _pad3: u32,
 };
-@group(0) @binding(2)
-var<uniform> sim_size: SimSizeUniform;
+
+fn get_lut_color(intensity: f32) -> vec4<f32> {
+    // Clamp intensity to [0, 1]
+    let clamped_intensity = clamp(intensity, 0.0, 1.0);
+    
+    // Convert to index in LUT (0-255)
+    let index = u32(clamped_intensity * 255.0);
+    
+    // Get RGB values from LUT (each component is 256 bytes long)
+    let r = f32(lut_data[index]) / 255.0;
+    let g = f32(lut_data[index + 256u]) / 255.0;
+    let b = f32(lut_data[index + 512u]) / 255.0;
+    
+    return vec4<f32>(r, g, b, 1.0);
+}
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -31,7 +48,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let idx = y * i32(sim_size.width) + x;
     let intensity = clamp(trail_map[idx], 0.0, 1.0);
-    let color = vec4<f32>(intensity, intensity, intensity, 1.0);
+    let color = get_lut_color(intensity);
     
     // Get texture dimensions
     let texture_width = textureDimensions(display_tex).x;

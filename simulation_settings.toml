@@ -8,14 +8,14 @@ windowHeight = 1080
 windowFullscreen = false
 
 # Agent settings
-agentCount = 500000
-agentJitter = 0.0
+agentCount = 10_000_000
+agentJitter = 0.1
 # Min must always be < Max
-agentSpeedMin = 10.0
-agentSpeedMax = 1000.0
-agentTurnSpeed = 2.0
+agentSpeedMin = 60.0
+agentSpeedMax = 60.0
+agentTurnSpeed = 0.8
 agentSensorAngle = 0.3
-agentSensorDistance = 30.0
+agentSensorDistance = 20.0
 
 # Pheromone settings
 pheromoneDepositionAmount = 1.0

@@ -3,9 +3,9 @@ use serde::Deserialize;
 use std::ops::Range;
 
 // General settings
-pub const WIDTH: u32 = 1600;
-pub const HEIGHT: u32 = 900;
-pub const IS_FULLSCREEN: bool = false;
+pub const DEFAULT_WIDTH: u32 = 1600;
+pub const DEFAULT_HEIGHT: u32 = 900;
+pub const DEFAULT_IS_FULLSCREEN: bool = false;
 
 // Agent settings
 pub const AGENT_COUNT: usize = 10000;
@@ -56,9 +56,9 @@ impl Default for Settings {
             pheromone_decay_factor: DECAY_FACTOR,
             pheromone_diffusion_rate: DIFFUSION_RATE,
             pheromone_deposition_amount: DEPOSITION_AMOUNT,
-            window_fullscreen: IS_FULLSCREEN,
-            window_height: HEIGHT,
-            window_width: WIDTH,
+            window_fullscreen: DEFAULT_IS_FULLSCREEN,
+            window_height: DEFAULT_HEIGHT,
+            window_width: DEFAULT_WIDTH,
             agent_sensor_angle: AGENT_SENSOR_ANGLE,
             agent_sensor_distance: AGENT_SENSOR_DISTANCE,
         }
