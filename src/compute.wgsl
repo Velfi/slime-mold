@@ -3,6 +3,31 @@
 
 const TAU: f32 = 6.28318530718; // 2π
 
+// Helper function for bilinear interpolation
+fn sample_trail_map(pos: vec2<f32>) -> f32 {
+    let x0 = i32(floor(pos.x));
+    let y0 = i32(floor(pos.y));
+    let x1 = x0 + 1;
+    let y1 = y0 + 1;
+    
+    // Check bounds
+    if (x0 < 0 || x1 >= i32(sim_size.width) || y0 < 0 || y1 >= i32(sim_size.height)) {
+        return 0.0;
+    }
+    
+    let dx = pos.x - f32(x0);
+    let dy = pos.y - f32(y0);
+    
+    let v00 = trail_map[y0 * i32(sim_size.width) + x0];
+    let v10 = trail_map[y0 * i32(sim_size.width) + x1];
+    let v01 = trail_map[y1 * i32(sim_size.width) + x0];
+    let v11 = trail_map[y1 * i32(sim_size.width) + x1];
+    
+    let v0 = mix(v00, v10, dx);
+    let v1 = mix(v01, v11, dx);
+    return mix(v0, v1, dy);
+}
+
 @group(0) @binding(0)
 var<storage, read_write> agents: array<vec4<f32>>;
 
@@ -51,38 +76,23 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let sensor_angle_right = angle + sim_size.agent_sensor_angle;
     let sensor_angle_center = angle;
 
-    let sensor_pos_left = vec2<i32>(
-        i32(x + sim_size.agent_sensor_distance * cos(sensor_angle_left)),
-        i32(y + sim_size.agent_sensor_distance * sin(sensor_angle_left))
+    let sensor_pos_left = vec2<f32>(
+        x + sim_size.agent_sensor_distance * cos(sensor_angle_left),
+        y + sim_size.agent_sensor_distance * sin(sensor_angle_left)
     );
-    let sensor_pos_right = vec2<i32>(
-        i32(x + sim_size.agent_sensor_distance * cos(sensor_angle_right)),
-        i32(y + sim_size.agent_sensor_distance * sin(sensor_angle_right))
+    let sensor_pos_right = vec2<f32>(
+        x + sim_size.agent_sensor_distance * cos(sensor_angle_right),
+        y + sim_size.agent_sensor_distance * sin(sensor_angle_right)
     );
-    let sensor_pos_center = vec2<i32>(
-        i32(x + sim_size.agent_sensor_distance * cos(sensor_angle_center)),
-        i32(y + sim_size.agent_sensor_distance * sin(sensor_angle_center))
+    let sensor_pos_center = vec2<f32>(
+        x + sim_size.agent_sensor_distance * cos(sensor_angle_center),
+        y + sim_size.agent_sensor_distance * sin(sensor_angle_center)
     );
 
-    // Sample the trail map at sensor positions
-    var left_value: f32;
-    if (sensor_pos_left.x < 0 || sensor_pos_left.x >= i32(sim_size.width) || sensor_pos_left.y < 0 || sensor_pos_left.y >= i32(sim_size.height)) {
-        left_value = 0.0;
-    } else {
-        left_value = trail_map[sensor_pos_left.y * i32(sim_size.width) + sensor_pos_left.x];
-    }
-    var right_value: f32;
-    if (sensor_pos_right.x < 0 || sensor_pos_right.x >= i32(sim_size.width) || sensor_pos_right.y < 0 || sensor_pos_right.y >= i32(sim_size.height)) {
-        right_value = 0.0;
-    } else {
-        right_value = trail_map[sensor_pos_right.y * i32(sim_size.width) + sensor_pos_right.x];
-    }
-    var center_value: f32;
-    if (sensor_pos_center.x < 0 || sensor_pos_center.x >= i32(sim_size.width) || sensor_pos_center.y < 0 || sensor_pos_center.y >= i32(sim_size.height)) {
-        center_value = 0.0;
-    } else {
-        center_value = trail_map[sensor_pos_center.y * i32(sim_size.width) + sensor_pos_center.x];
-    }
+    // Sample the trail map at sensor positions using bilinear interpolation
+    let left_value = sample_trail_map(sensor_pos_left);
+    let right_value = sample_trail_map(sensor_pos_right);
+    let center_value = sample_trail_map(sensor_pos_center);
 
     // Update agent angle based on sensor values
     if (center_value > left_value && center_value > right_value) {
@@ -105,7 +115,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let jitter_strength = sim_size.agent_jitter;
     // Create a more independent random value using agent index and time
     let random_val = fract(sin(f32(agent_index) * 12.9898 + x * 78.233 + y * 37.719) * 43758.5453);
-    angle += (random_val * 2.0 - 1.0) * jitter_strength * 0.01;
+    angle += (random_val * 2.0 - 1.0) * jitter_strength;
 
     // Normalize angle to 0-2π range
     angle = angle % (2.0 * 3.14159265359);
@@ -142,7 +152,10 @@ fn decay_trail(@builtin(global_invocation_id) id: vec3<u32>) {
     if (x >= i32(sim_size.width) || y >= i32(sim_size.height)) {
         return;
     }
-    let idx = y * i32(sim_size.width) + x;
+    // Toroidal wrapping for index
+    let wrapped_x = (x + i32(sim_size.width)) % i32(sim_size.width);
+    let wrapped_y = (y + i32(sim_size.height)) % i32(sim_size.height);
+    let idx = wrapped_y * i32(sim_size.width) + wrapped_x;
     let decay_factor = sim_size.decay_factor * 0.001;
     trail_map[idx] = max(trail_map[idx] - decay_factor, 0.0);
 }
@@ -159,22 +172,17 @@ fn diffuse_trail(@builtin(global_invocation_id) id: vec3<u32>) {
     let idx = y * i32(sim_size.width) + x;
     let diffusion_rate = clamp(sim_size.diffusion_rate, 0.0, 1.0);
     
-    // Box blur using 3x3 neighborhood
+    // Box blur using 3x3 neighborhood with toroidal wrapping
     var sum = 0.0;
     var count = 0.0;
+    let width = i32(sim_size.width);
+    let height = i32(sim_size.height);
     
-    // Check all neighbors in 3x3 grid
     for (var dy = -1; dy <= 1; dy++) {
         for (var dx = -1; dx <= 1; dx++) {
-            let nx = x + dx;
-            let ny = y + dy;
-            
-            // Skip if out of bounds
-            if (nx < 0 || nx >= i32(sim_size.width) || ny < 0 || ny >= i32(sim_size.height)) {
-                continue;
-            }
-            
-            let sample_idx = ny * i32(sim_size.width) + nx;
+            let nx = (x + dx + width) % width;
+            let ny = (y + dy + height) % height;
+            let sample_idx = ny * width + nx;
             sum += trail_map[sample_idx];
             count += 1.0;
         }
