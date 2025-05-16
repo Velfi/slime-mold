@@ -119,5 +119,20 @@ pub fn init_preset_manager() -> PresetManager {
             ..Settings::default()
         },
     ));
+    preset_manager.add_preset(Preset::new(
+        "Snake".to_string(),
+        Settings {
+            agent_jitter: 3.0,
+            agent_speed_min: 100.0,
+            agent_speed_max: 120.0,
+            agent_turn_speed: 6.5,
+            agent_sensor_angle: 1.57,
+            agent_sensor_distance: 225.0,
+            pheromone_deposition_amount: 1.0,
+            pheromone_decay_factor: 10.0,
+            pheromone_diffusion_rate: 1.0,
+            ..Settings::default()
+        },
+    ));
     preset_manager
 }

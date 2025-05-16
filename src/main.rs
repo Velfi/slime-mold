@@ -7,7 +7,7 @@ use slime::settings::Settings;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
-use wgpu::{Backends, Buffer, BufferUsages, Instance, Queue, TextureUsages};
+use wgpu::{Backends, Buffer, BufferUsages, Device, Instance, Queue, TextureUsages};
 use winit::{
     event::{ElementState, Event, WindowEvent},
     event_loop::EventLoop,
@@ -94,6 +94,52 @@ fn update_settings(
     queue.write_buffer(sim_size_buffer, 0, bytemuck::bytes_of(&sim_size_uniform));
 }
 
+fn reassign_agent_speeds(
+    agent_buffer: &Buffer,
+    device: &Device,
+    queue: &Queue,
+    agent_count: usize,
+    speed_min: f32,
+    speed_max: f32,
+) {
+    let agent_buf_size = (agent_count * 4 * std::mem::size_of::<f32>()) as u64;
+    let temp_agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Temp Agent Buffer"),
+        size: agent_buf_size,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    // Copy from agent_buffer to temp_agent_buffer
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Agent Copy Encoder"),
+    });
+    encoder.copy_buffer_to_buffer(&agent_buffer, 0, &temp_agent_buffer, 0, agent_buf_size);
+    queue.submit(Some(encoder.finish()));
+
+    // Map and read
+    {
+        let agent_slice = temp_agent_buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        agent_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+        device.poll(wgpu::Maintain::Wait);
+        receiver.recv().unwrap().unwrap();
+        let agent_data = agent_slice.get_mapped_range();
+        let mut agents: Vec<f32> = bytemuck::cast_slice(&agent_data).to_vec();
+        
+        // Reassign speeds
+        let speed_range = speed_max - speed_min;
+        for i in 0..agent_count {
+            let offset = i * 4;
+            agents[offset + 3] = speed_min + rand::random::<f32>() * speed_range;
+        }
+        drop(agent_data);
+        
+        // Write back
+        queue.write_buffer(agent_buffer, 0, bytemuck::cast_slice(&agents));
+    }
+}
+
 fn main() {
     let mut settings = Settings::default();
 
@@ -138,6 +184,8 @@ fn main() {
     let mut j_pressed = false;
     // Track S key state for speed
     let mut s_pressed = false;
+    // Track X key state for max speed
+    let mut x_pressed = false;
     // Track A key state for sensor angle
     let mut a_pressed = false;
     // Track D key state for sensor distance
@@ -152,6 +200,10 @@ fn main() {
     let mut n_pressed = false;
     // Track P key state to prevent holding
     let mut p_pressed = false;
+    // Track R key state for LUT reversal
+    let mut r_pressed = false;
+    // Track if LUT is currently reversed
+    let mut lut_reversed = false;
 
     // FPS counter variables
     let mut frame_count = 0;
@@ -210,8 +262,8 @@ fn main() {
 
     // Get physical size for HiDPI/Retina displays
     let scale_factor = window.scale_factor();
-    let physical_width = (logical_width as f64 * scale_factor) as u32;
-    let physical_height = (logical_height as f64 * scale_factor) as u32;
+    let mut physical_width = (logical_width as f64 * scale_factor) as u32;
+    let mut physical_height = (logical_height as f64 * scale_factor) as u32;
 
     // Configure the surface
     let surface_caps = surface.get_capabilities(&adapter);
@@ -252,7 +304,7 @@ fn main() {
 
     // Create the trail map as a storage buffer instead of a storage texture
     let trail_map_size = (physical_width * physical_height) as usize;
-    let trail_map_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+    let mut trail_map_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Trail Map Buffer"),
         size: (trail_map_size * std::mem::size_of::<f32>()) as u64,
         usage: wgpu::BufferUsages::STORAGE
@@ -425,6 +477,21 @@ fn main() {
                     ..
                 } => {
                     s_pressed = state == ElementState::Pressed;
+                }
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::KeyboardInput {
+                            event:
+                                winit::event::KeyEvent {
+                                    state,
+                                    physical_key: PhysicalKey::Code(KeyCode::KeyX),
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => {
+                    x_pressed = state == ElementState::Pressed;
                 }
                 Event::WindowEvent {
                     event:
@@ -653,7 +720,14 @@ fn main() {
                             PhysicalKey::Code(KeyCode::ArrowUp) => {
                                 let increment = if shift_pressed { 1.0 } else { 5.0 };
                                 settings.agent_speed_min += increment;
-                                settings.agent_speed_max += increment;
+                                reassign_agent_speeds(
+                                    &agent_buffer,
+                                    &device,
+                                    &queue,
+                                    settings.agent_count,
+                                    settings.agent_speed_min,
+                                    settings.agent_speed_max,
+                                );
                                 update_settings(
                                     &mut settings,
                                     &mut current_preset_name,
@@ -666,10 +740,61 @@ fn main() {
                             }
                             PhysicalKey::Code(KeyCode::ArrowDown) => {
                                 let decrement = if shift_pressed { 1.0 } else { 5.0 };
-                                settings.agent_speed_min =
-                                    (settings.agent_speed_min - decrement).max(0.0);
-                                settings.agent_speed_max =
-                                    (settings.agent_speed_max - decrement).max(0.0);
+                                settings.agent_speed_min = (settings.agent_speed_min - decrement).max(0.0);
+                                reassign_agent_speeds(
+                                    &agent_buffer,
+                                    &device,
+                                    &queue,
+                                    settings.agent_count,
+                                    settings.agent_speed_min,
+                                    settings.agent_speed_max,
+                                );
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            _ => {}
+                        }
+                    } else if x_pressed {
+                        match physical_key {
+                            PhysicalKey::Code(KeyCode::ArrowUp) => {
+                                let increment = if shift_pressed { 1.0 } else { 5.0 };
+                                settings.agent_speed_max += increment;
+                                reassign_agent_speeds(
+                                    &agent_buffer,
+                                    &device,
+                                    &queue,
+                                    settings.agent_count,
+                                    settings.agent_speed_min,
+                                    settings.agent_speed_max,
+                                );
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            PhysicalKey::Code(KeyCode::ArrowDown) => {
+                                let decrement = if shift_pressed { 1.0 } else { 5.0 };
+                                settings.agent_speed_max = (settings.agent_speed_max - decrement).max(settings.agent_speed_min);
+                                reassign_agent_speeds(
+                                    &agent_buffer,
+                                    &device,
+                                    &queue,
+                                    settings.agent_count,
+                                    settings.agent_speed_min,
+                                    settings.agent_speed_max,
+                                );
                                 update_settings(
                                     &mut settings,
                                     &mut current_preset_name,
@@ -957,9 +1082,14 @@ fn main() {
                                 }
 
                                 // Load the new LUT data
-                                let lut_data = lut_manager
+                                let mut lut_data = lut_manager
                                     .load_lut(&available_luts[current_lut_index])
                                     .expect("Failed to load LUT");
+
+                                // If currently reversed, reverse the new LUT
+                                if lut_reversed {
+                                    lut_data.reverse();
+                                }
 
                                 // Update LUT buffer
                                 let mut lut_data_combined = Vec::with_capacity(768);
@@ -976,8 +1106,49 @@ fn main() {
 
                                 // Update window title to show current LUT
                                 window.set_title(&format!(
-                                    "Physarum Simulation - LUT: {}",
-                                    available_luts[current_lut_index]
+                                    "Physarum Simulation - LUT: {}{}",
+                                    available_luts[current_lut_index],
+                                    if lut_reversed { " (Reversed)" } else { "" }
+                                ));
+                                last_lut_update = Instant::now();
+                            }
+                            PhysicalKey::Code(KeyCode::KeyR) => {
+                                // Toggle LUT reversal
+                                let mut lut_data = lut_manager
+                                    .load_lut(&available_luts[current_lut_index])
+                                    .expect("Failed to load LUT");
+                                
+                                if lut_reversed {
+                                    // If currently reversed, load the original LUT
+                                    lut_data = lut_manager
+                                        .load_lut(&available_luts[current_lut_index])
+                                        .expect("Failed to load LUT");
+                                } else {
+                                    // If not reversed, reverse the LUT
+                                    lut_data.reverse();
+                                }
+                                
+                                // Toggle the reversed state
+                                lut_reversed = !lut_reversed;
+
+                                // Update LUT buffer with data
+                                let mut lut_data_combined = Vec::with_capacity(768);
+                                lut_data_combined.extend_from_slice(&lut_data.red);
+                                lut_data_combined.extend_from_slice(&lut_data.green);
+                                lut_data_combined.extend_from_slice(&lut_data.blue);
+                                let lut_data_u32: Vec<u32> =
+                                    lut_data_combined.iter().map(|&x| x as u32).collect();
+                                queue.write_buffer(
+                                    &lut_buffer,
+                                    0,
+                                    bytemuck::cast_slice(&lut_data_u32),
+                                );
+
+                                // Update window title to show LUT state
+                                window.set_title(&format!(
+                                    "Physarum Simulation - LUT: {}{}",
+                                    available_luts[current_lut_index],
+                                    if lut_reversed { " (Reversed)" } else { "" }
                                 ));
                                 last_lut_update = Instant::now();
                             }
@@ -1014,8 +1185,8 @@ fn main() {
                     let logical_height = (new_size.height as f64 / scale_factor) as u32;
 
                     // Calculate physical size for HiDPI/Retina displays
-                    let physical_width = (logical_width as f64 * scale_factor) as u32;
-                    let physical_height = (logical_height as f64 * scale_factor) as u32;
+                    physical_width = (logical_width as f64 * scale_factor) as u32;
+                    physical_height = (logical_height as f64 * scale_factor) as u32;
 
                     info!(
                         "[resize] logical size: {}x{}, physical size: {}x{}, scale factor: {}",
@@ -1025,6 +1196,11 @@ fn main() {
                         physical_height,
                         scale_factor
                     );
+
+                    // Update surface configuration
+                    config.width = physical_width;
+                    config.height = physical_height;
+                    surface.configure(&device, &config);
 
                     // --- SCALE AGENT POSITIONS ---
                     {
@@ -1036,10 +1212,9 @@ fn main() {
                             mapped_at_creation: false,
                         });
                         // Copy from agent_buffer to temp_agent_buffer
-                        let mut encoder =
-                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("Agent Copy Encoder"),
-                            });
+                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("Agent Copy Encoder"),
+                        });
                         encoder.copy_buffer_to_buffer(
                             &agent_buffer,
                             0,
@@ -1052,8 +1227,7 @@ fn main() {
                         {
                             let agent_slice = temp_agent_buffer.slice(..);
                             let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-                            agent_slice
-                                .map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+                            agent_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
                             device.poll(wgpu::Maintain::Wait);
                             receiver.recv().unwrap().unwrap();
                             let agent_data = agent_slice.get_mapped_range();
@@ -1071,72 +1245,23 @@ fn main() {
                         // temp_agent_buffer drops here
                     }
 
-                    // --- SCALE PHEROMONE/TRAIL MAP ---
+                    // --- ALWAYS RESIZE PHEROMONE/TRAIL MAP TO MATCH WINDOW ---
                     {
                         let new_size = (physical_width * physical_height) as usize;
-                        let trail_buf_size =
-                            (old_width * old_height * std::mem::size_of::<f32>() as u32) as u64;
-                        let temp_trail_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("Temp Trail Buffer"),
+                        let trail_buf_size = (new_size * std::mem::size_of::<f32>()) as u64;
+                        // Create new trail map buffer with the correct size
+                        let new_trail_map_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("Trail Map Buffer"),
                             size: trail_buf_size,
-                            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                            usage: wgpu::BufferUsages::STORAGE
+                                | wgpu::BufferUsages::COPY_SRC
+                                | wgpu::BufferUsages::COPY_DST,
                             mapped_at_creation: false,
                         });
-                        // Copy from trail_map_buffer to temp_trail_buffer
-                        let mut encoder =
-                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("Trail Copy Encoder"),
-                            });
-                        encoder.copy_buffer_to_buffer(
-                            &trail_map_buffer,
-                            0,
-                            &temp_trail_buffer,
-                            0,
-                            trail_buf_size,
-                        );
-                        queue.submit(Some(encoder.finish()));
-                        // Map and read
-                        {
-                            let trail_slice = temp_trail_buffer.slice(..);
-                            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-                            trail_slice
-                                .map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
-                            device.poll(wgpu::Maintain::Wait);
-                            receiver.recv().unwrap().unwrap();
-                            let trail_data = trail_slice.get_mapped_range();
-                            let old_trail: Vec<f32> = bytemuck::cast_slice(&trail_data).to_vec();
-                            drop(trail_data);
-                            // Nearest-neighbor resample
-                            let mut new_trail = vec![0.0f32; new_size];
-                            for y in 0..physical_height {
-                                for x in 0..physical_width {
-                                    let src_x = (x as u64 * old_width as u64
-                                        / physical_width as u64)
-                                        as u32;
-                                    let src_y = (y as u64 * old_height as u64
-                                        / physical_height as u64)
-                                        as u32;
-                                    let src_idx = (src_y * old_width + src_x) as usize;
-                                    let dst_idx = (y * physical_width + x) as usize;
-                                    if src_idx < old_trail.len() && dst_idx < new_trail.len() {
-                                        new_trail[dst_idx] = old_trail[src_idx];
-                                    }
-                                }
-                            }
-                            // Write back
-                            queue.write_buffer(
-                                &trail_map_buffer,
-                                0,
-                                bytemuck::cast_slice(&new_trail),
-                            );
-                        }
-                        // temp_trail_buffer drops here
+                        // Optionally, resample old data if desired (omitted for clarity)
+                        // Replace old buffer with new one
+                        trail_map_buffer = new_trail_map_buffer;
                     }
-
-                    // Update surface configuration
-                    config.width = physical_width;
-                    config.height = physical_height;
-                    surface.configure(&device, &config);
 
                     // Recreate the display texture
                     let texture_width = physical_width.min(max_texture_dimension);
@@ -1149,6 +1274,25 @@ fn main() {
                         "[resize] display_texture size: width: {}, height: {}",
                         texture_width, texture_height
                     );
+
+                    // Create new display texture with updated size
+                    let display_texture = device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Display Texture"),
+                        size: wgpu::Extent3d {
+                            width: texture_width,
+                            height: texture_height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        usage: wgpu::TextureUsages::STORAGE_BINDING
+                            | wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::COPY_SRC,
+                        view_formats: &[],
+                    });
+                    let display_view = display_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
                     // Update uniform buffer with new size
                     let sim_size_uniform = SimSizeUniform::new(
@@ -1183,6 +1327,9 @@ fn main() {
                         &display_view,
                         &display_sampler,
                     );
+
+                    // Update text renderer window size
+                    text_renderer.update_window_size(physical_height);
                 }
                 Event::AboutToWait => {
                     // Calculate FPS
@@ -1228,7 +1375,7 @@ fn main() {
                             let agent_speed_max = format_float_dynamic(settings.agent_speed_max);
                             let agent_turn_speed = format_float_dynamic(settings.agent_turn_speed);
                             let agent_sensor_angle =
-                                format_float_dynamic(settings.agent_sensor_angle);
+                                format_float_dynamic(settings.agent_sensor_angle * 180.0 / std::f32::consts::PI);
                             let agent_sensor_distance =
                                 format_float_dynamic(settings.agent_sensor_distance);
 
@@ -1240,9 +1387,10 @@ fn main() {
                                 (B) Diffusion:\t{diffusion_rate}\n\
                                 (F) Deposition:\t{deposition_amount}\n\
                                 (J) Jitter:\t{agent_jitter}\n\
-                                (S) Speed:\t{agent_speed_min}-{agent_speed_max}\n\
+                                (S) Min Speed:\t{agent_speed_min}\n\
+                                (X) Max Speed:\t{agent_speed_max}\n\
                                 (T) Turn:\t{agent_turn_speed}\n\
-                                (A) Angle:\t{agent_sensor_angle}\n\
+                                (A) Angle:\t{agent_sensor_angle}°\n\
                                 (D) Distance:\t{agent_sensor_distance}\n\
                                 Press / to toggle help\n\
                                 Press C to clear trail map\n\

@@ -41,36 +41,45 @@ fn get_lut_color(intensity: f32) -> vec4<f32> {
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let x = i32(id.x);
-    let y = i32(id.y);
-    if (x >= i32(sim_size.width) || y >= i32(sim_size.height)) {
-        return;
-    }
-    let idx = y * i32(sim_size.width) + x;
-    let intensity = clamp(trail_map[idx], 0.0, 1.0);
-    let color = get_lut_color(intensity);
-    
-    // Get texture dimensions
     let texture_width = textureDimensions(display_tex).x;
     let texture_height = textureDimensions(display_tex).y;
-    
-    // Calculate scaling factors
-    let scale_x = f32(texture_width) / f32(sim_size.width);
-    let scale_y = f32(texture_height) / f32(sim_size.height);
-    
-    // Calculate scaled coordinates
-    let scaled_x = i32(f32(x) * scale_x);
-    let scaled_y = i32(f32(y) * scale_y);
-    
-    // Write to all pixels in the scaled region
-    let next_x = i32(f32(x + 1) * scale_x);
-    let next_y = i32(f32(y + 1) * scale_y);
-    
-    for (var ty = scaled_y; ty < next_y; ty = ty + 1) {
-        for (var tx = scaled_x; tx < next_x; tx = tx + 1) {
-            if (tx >= 0 && tx < i32(texture_width) && ty >= 0 && ty < i32(texture_height)) {
-                textureStore(display_tex, vec2<i32>(tx, ty), color);
-            }
-        }
+    let sim_width = f32(sim_size.width);
+    let sim_height = f32(sim_size.height);
+    let tex_width = f32(texture_width);
+    let tex_height = f32(texture_height);
+
+    // Compute aspect ratios
+    let sim_aspect = sim_width / sim_height;
+    let tex_aspect = tex_width / tex_height;
+
+    // Compute scale and offsets to center the simulation
+    var scale: f32;
+    var offset_x: f32 = 0.0;
+    var offset_y: f32 = 0.0;
+    if (tex_aspect > sim_aspect) {
+        // Texture is wider than simulation: fit height
+        scale = tex_height / sim_height;
+        offset_x = (tex_width - sim_width * scale) * 0.5;
+    } else {
+        // Texture is taller than simulation: fit width
+        scale = tex_width / sim_width;
+        offset_y = (tex_height - sim_height * scale) * 0.5;
+    }
+
+    // Map texture pixel to simulation coordinates
+    let fx = (f32(id.x) - offset_x) / scale;
+    let fy = (f32(id.y) - offset_y) / scale;
+
+    // Only draw if inside simulation bounds
+    if (fx >= 0.0 && fx < sim_width && fy >= 0.0 && fy < sim_height) {
+        let x = i32(fx);
+        let y = i32(fy);
+        let idx = y * i32(sim_size.width) + x;
+        let intensity = clamp(trail_map[idx], 0.0, 1.0);
+        let color = get_lut_color(intensity);
+        textureStore(display_tex, vec2<i32>(i32(id.x), i32(id.y)), color);
+    } else {
+        // Fill bars with black
+        textureStore(display_tex, vec2<i32>(i32(id.x), i32(id.y)), vec4<f32>(0.0, 0.0, 0.0, 1.0));
     }
 } 
