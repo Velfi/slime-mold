@@ -2,12 +2,12 @@ use bytemuck::cast_slice_mut;
 use log::info;
 use num_format::{Locale, ToFormattedString};
 use slime::lut_manager::LutManager;
+use slime::presets::init_preset_manager;
 use slime::settings::Settings;
-use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
-use wgpu::{Backends, BufferUsages, Instance, TextureUsages};
+use wgpu::{Backends, Buffer, BufferUsages, Instance, Queue, TextureUsages};
 use winit::{
     event::{ElementState, Event, WindowEvent},
     event_loop::EventLoop,
@@ -15,8 +15,51 @@ use winit::{
     window::WindowBuilder,
 };
 
+mod bind_group_manager;
+mod pipeline_manager;
+mod shader_manager;
 mod text_renderer;
+
+use bind_group_manager::BindGroupManager;
+use pipeline_manager::PipelineManager;
+use shader_manager::ShaderManager;
 use text_renderer::TextRenderer;
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct SimSizeUniform {
+    width: u32,
+    height: u32,
+    decay_factor: f32,
+    agent_jitter: f32,
+    agent_speed_min: f32,
+    agent_speed_max: f32,
+    agent_turn_speed: f32,
+    agent_sensor_angle: f32,
+    agent_sensor_distance: f32,
+    diffusion_rate: f32,
+    pheromone_deposition_amount: f32,
+    _pad: [u32; 1],
+}
+
+impl SimSizeUniform {
+    fn new(width: u32, height: u32, decay_factor: f32, settings: &Settings) -> Self {
+        Self {
+            width,
+            height,
+            decay_factor,
+            agent_jitter: settings.agent_jitter,
+            agent_speed_min: settings.agent_speed_min,
+            agent_speed_max: settings.agent_speed_max,
+            agent_turn_speed: settings.agent_turn_speed,
+            agent_sensor_angle: settings.agent_sensor_angle,
+            agent_sensor_distance: settings.agent_sensor_distance,
+            diffusion_rate: settings.pheromone_diffusion_rate,
+            pheromone_deposition_amount: settings.pheromone_deposition_amount,
+            _pad: [0],
+        }
+    }
+}
 
 fn format_float_dynamic(val: f32) -> String {
     let s = format!("{}", val);
@@ -32,9 +75,31 @@ fn format_float_dynamic(val: f32) -> String {
     }
 }
 
+fn update_settings(
+    settings: &mut Settings,
+    current_preset_name: &mut String,
+    sim_size_buffer: &Buffer,
+    queue: &Queue,
+    physical_width: u32,
+    physical_height: u32,
+    _decay_factor: f32, // Rename to indicate it's not used
+) {
+    *current_preset_name = "CUSTOM".to_string();
+    let sim_size_uniform = SimSizeUniform::new(
+        physical_width,
+        physical_height,
+        settings.pheromone_decay_factor,
+        settings,
+    );
+    queue.write_buffer(sim_size_buffer, 0, bytemuck::bytes_of(&sim_size_uniform));
+}
+
 fn main() {
-    let settings = Settings::load_from_file("simulation_settings.toml")
-        .expect("Failed to load settings simulation_settings.toml");
+    let mut settings = Settings::default();
+
+    // Initialize preset manager
+    let preset_manager = init_preset_manager();
+    let mut current_preset_name = "Default".to_string();
 
     // Initialize LUT manager and get available LUTs
     let lut_manager = LutManager::new();
@@ -67,12 +132,36 @@ fn main() {
 
     // Track shift key state
     let mut shift_pressed = false;
+    // Track T key state
+    let mut t_pressed = false;
+    // Track J key state
+    let mut j_pressed = false;
+    // Track S key state for speed
+    let mut s_pressed = false;
+    // Track A key state for sensor angle
+    let mut a_pressed = false;
+    // Track D key state for sensor distance
+    let mut d_pressed = false;
+    // Track F key state for deposition amount
+    let mut f_pressed = false;
+    // Track V key state for decay factor
+    let mut v_pressed = false;
+    // Track B key state for diffusion rate
+    let mut b_pressed = false;
+    // Track P key state to prevent holding
+    let mut p_pressed = false;
 
     // FPS counter variables
     let mut frame_count = 0;
     let mut last_fps_update = Instant::now();
     let mut last_frame_time = Instant::now();
     let fps_update_interval = Duration::from_secs(1);
+    // Help text update interval (30fps)
+    let help_update_interval = Duration::from_millis(33); // ~30fps
+    let mut last_help_update = Instant::now();
+    // LUT name display duration
+    let lut_display_duration = Duration::from_secs(3);
+    let mut last_lut_update = Instant::now();
 
     // After creating the window, wrap it in Arc for cheap cloning
     let window = Arc::new(window);
@@ -191,208 +280,18 @@ fn main() {
     });
     let display_view = display_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-    // Create a sampler for the display texture
-    let display_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("Display Sampler"),
-        address_mode_u: wgpu::AddressMode::ClampToEdge,
-        address_mode_v: wgpu::AddressMode::ClampToEdge,
-        address_mode_w: wgpu::AddressMode::ClampToEdge,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        mipmap_filter: wgpu::FilterMode::Nearest,
-        ..Default::default()
-    });
-
     // Create a uniform buffer for simulation/display size
-    #[repr(C)]
-    #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-    struct SimSizeUniform {
-        width: u32,
-        height: u32,
-        decay_factor: f32,
-        agent_jitter: f32,
-        agent_speed_min: f32,
-        agent_speed_max: f32,
-        agent_turn_speed: f32,
-        agent_sensor_angle: f32,
-        agent_sensor_distance: f32,
-        diffusion_rate: f32,
-        pheromone_deposition_amount: f32,
-        _pad: [u32; 1],
-    }
-    let sim_size_uniform = SimSizeUniform {
-        width: physical_width,
-        height: physical_height,
-        decay_factor,
-        agent_jitter: settings.agent_jitter,
-        agent_speed_min: settings.agent_speed_min,
-        agent_speed_max: settings.agent_speed_max,
-        agent_turn_speed: settings.agent_turn_speed,
-        agent_sensor_angle: settings.agent_sensor_angle,
-        agent_sensor_distance: settings.agent_sensor_distance,
-        diffusion_rate: settings.pheromone_diffusion_rate,
-        pheromone_deposition_amount: settings.pheromone_deposition_amount,
-        _pad: [0],
-    };
+    let sim_size_uniform =
+        SimSizeUniform::new(physical_width, physical_height, decay_factor, &settings);
     let sim_size_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Sim Size Uniform Buffer"),
         contents: bytemuck::bytes_of(&sim_size_uniform),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
 
-    // Create bind group layout and bind group for the compute pipeline
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Compute Bind Group Layout"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::COMPUTE,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-        ],
-    });
-
-    // Create the compute pipeline
-    let compute_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Compute Shader"),
-        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("compute.wgsl"))),
-    });
-
-    let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Compute Pipeline"),
-        layout: Some(
-            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Compute Pipeline Layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
-            }),
-        ),
-        module: &compute_shader,
-        entry_point: "main",
-        compilation_options: wgpu::PipelineCompilationOptions::default(),
-    });
-
-    // Create the decay pipeline (after compute_pipeline)
-    let decay_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Decay Pipeline"),
-        layout: Some(
-            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Decay Pipeline Layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
-            }),
-        ),
-        module: &compute_shader,
-        entry_point: "decay_trail",
-        compilation_options: wgpu::PipelineCompilationOptions::default(),
-    });
-
-    let diffuse_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Diffuse Pipeline"),
-        layout: Some(
-            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Diffuse Pipeline Layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
-            }),
-        ),
-        module: &compute_shader,
-        entry_point: "diffuse_trail",
-        compilation_options: wgpu::PipelineCompilationOptions::default(),
-    });
-
-    // Create bind group
-    let mut bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Compute Bind Group"),
-        layout: &bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: agent_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: trail_map_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: sim_size_buffer.as_entire_binding(),
-            },
-        ],
-    });
-
-    // Create bind group layout and bind group for display compute pipeline
-    let display_bind_group_layout =
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Display Compute Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
+    // Initialize shader and pipeline managers
+    let shader_manager = ShaderManager::new(&device);
+    let pipeline_manager = PipelineManager::new(&device, &shader_manager);
 
     // Create LUT buffer
     let mut lut_data_combined = Vec::with_capacity(768);
@@ -409,214 +308,31 @@ fn main() {
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
     });
 
-    let mut display_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Display Compute Bind Group"),
-        layout: &display_bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: trail_map_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(&display_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: sim_size_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: lut_buffer.as_entire_binding(),
-            },
-        ],
-    });
-    let display_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Display Compute Shader"),
-        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("display.wgsl"))),
-    });
-    let display_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("Display Compute Pipeline"),
-        layout: Some(
-            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Display Compute Pipeline Layout"),
-                bind_group_layouts: &[&display_bind_group_layout],
-                push_constant_ranges: &[],
-            }),
-        ),
-        module: &display_shader,
-        entry_point: "main",
-        compilation_options: wgpu::PipelineCompilationOptions::default(),
+    // Create a sampler for the display texture
+    let display_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("Display Sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
     });
 
-    // Create bind group layout and bind group for the render pipeline
-    let render_bind_group_layout =
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Render Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-    let mut render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("Render Bind Group"),
-        layout: &render_bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&display_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&display_sampler),
-            },
-        ],
-    });
-
-    // Load quad.wgsl and create the render pipeline
-    let quad_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Quad Shader"),
-        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("quad.wgsl"))),
-    });
-    let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Render Pipeline Layout"),
-        bind_group_layouts: &[&render_bind_group_layout],
-        push_constant_ranges: &[],
-    });
-    let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Render Pipeline"),
-        layout: Some(&render_pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &quad_shader,
-            entry_point: "vs_main",
-            buffers: &[],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &quad_shader,
-            entry_point: "fs_main",
-            targets: &[Some(wgpu::ColorTargetState {
-                format: config.format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None,
-            unclipped_depth: false,
-            polygon_mode: wgpu::PolygonMode::Fill,
-            conservative: false,
-        },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-    });
-
-    // After creating the render pipeline, add:
-    let text_bind_group_layout =
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Text Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-    let text_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Text Shader"),
-        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("text.wgsl"))),
-    });
-
-    let text_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Text Pipeline Layout"),
-        bind_group_layouts: &[&text_bind_group_layout],
-        push_constant_ranges: &[],
-    });
-
-    let text_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Text Pipeline"),
-        layout: Some(&text_pipeline_layout),
-        vertex: wgpu::VertexState {
-            module: &text_shader,
-            entry_point: "vs_main",
-            buffers: &[],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &text_shader,
-            entry_point: "fs_main",
-            targets: &[Some(wgpu::ColorTargetState {
-                format: config.format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleList,
-            strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: None,
-            unclipped_depth: false,
-            polygon_mode: wgpu::PolygonMode::Fill,
-            conservative: false,
-        },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-    });
+    // Initialize bind group manager
+    let mut bind_group_manager = BindGroupManager::new(
+        &device,
+        &pipeline_manager.compute_bind_group_layout,
+        &pipeline_manager.display_bind_group_layout,
+        &pipeline_manager.render_bind_group_layout,
+        &agent_buffer,
+        &trail_map_buffer,
+        &sim_size_buffer,
+        &display_view,
+        &display_sampler,
+        &lut_buffer,
+    );
 
     // Create Arc-wrapped resources for text renderer
     let sim_size_buffer = Arc::new(sim_size_buffer);
@@ -652,61 +368,6 @@ fn main() {
                         WindowEvent::KeyboardInput {
                             event:
                                 winit::event::KeyEvent {
-                                    state: ElementState::Pressed,
-                                    physical_key,
-                                    ..
-                                },
-                            ..
-                        },
-                    ..
-                } => match physical_key {
-                    PhysicalKey::Code(KeyCode::Escape) => target.exit(),
-                    PhysicalKey::Code(KeyCode::KeyG) => {
-                        // Cycle LUTs (forward or backward based on shift key)
-                        if shift_pressed {
-                            log::debug!("Cycle backwards");
-                            // Cycle backwards
-                            if current_lut_index == 0 {
-                                current_lut_index = available_luts.len() - 1;
-                            } else {
-                                current_lut_index -= 1;
-                            }
-                        } else {
-                            log::debug!("Cycle forwards");
-                            // Cycle forwards
-                            current_lut_index = (current_lut_index + 1) % available_luts.len();
-                        }
-
-                        // Load the new LUT data
-                        let lut_data = lut_manager
-                            .load_lut(&available_luts[current_lut_index])
-                            .expect("Failed to load LUT");
-
-                        // Update LUT buffer
-                        let mut lut_data_combined = Vec::with_capacity(768);
-                        lut_data_combined.extend_from_slice(&lut_data.red);
-                        lut_data_combined.extend_from_slice(&lut_data.green);
-                        lut_data_combined.extend_from_slice(&lut_data.blue);
-                        let lut_data_u32: Vec<u32> =
-                            lut_data_combined.iter().map(|&x| x as u32).collect();
-                        queue.write_buffer(&lut_buffer, 0, bytemuck::cast_slice(&lut_data_u32));
-
-                        // Update window title to show current LUT
-                        window.set_title(&format!(
-                            "Physarum Simulation - LUT: {}",
-                            available_luts[current_lut_index]
-                        ));
-                    }
-                    PhysicalKey::Code(KeyCode::Slash) => {
-                        text_renderer.toggle_visibility();
-                    }
-                    _ => {}
-                },
-                Event::WindowEvent {
-                    event:
-                        WindowEvent::KeyboardInput {
-                            event:
-                                winit::event::KeyEvent {
                                     state,
                                     physical_key:
                                         PhysicalKey::Code(KeyCode::ShiftLeft | KeyCode::ShiftRight),
@@ -717,6 +378,508 @@ fn main() {
                     ..
                 } => {
                     shift_pressed = state == ElementState::Pressed;
+                }
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::KeyboardInput {
+                            event:
+                                winit::event::KeyEvent {
+                                    state,
+                                    physical_key: PhysicalKey::Code(KeyCode::KeyT),
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => {
+                    t_pressed = state == ElementState::Pressed;
+                }
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::KeyboardInput {
+                            event:
+                                winit::event::KeyEvent {
+                                    state,
+                                    physical_key: PhysicalKey::Code(KeyCode::KeyJ),
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => {
+                    j_pressed = state == ElementState::Pressed;
+                }
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::KeyboardInput {
+                            event:
+                                winit::event::KeyEvent {
+                                    state,
+                                    physical_key: PhysicalKey::Code(KeyCode::KeyS),
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => {
+                    s_pressed = state == ElementState::Pressed;
+                }
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::KeyboardInput {
+                            event:
+                                winit::event::KeyEvent {
+                                    state,
+                                    physical_key: PhysicalKey::Code(KeyCode::KeyA),
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => {
+                    a_pressed = state == ElementState::Pressed;
+                }
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::KeyboardInput {
+                            event:
+                                winit::event::KeyEvent {
+                                    state,
+                                    physical_key: PhysicalKey::Code(KeyCode::KeyD),
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => {
+                    d_pressed = state == ElementState::Pressed;
+                }
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::KeyboardInput {
+                            event:
+                                winit::event::KeyEvent {
+                                    state,
+                                    physical_key: PhysicalKey::Code(KeyCode::KeyF),
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => {
+                    f_pressed = state == ElementState::Pressed;
+                }
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::KeyboardInput {
+                            event:
+                                winit::event::KeyEvent {
+                                    state,
+                                    physical_key: PhysicalKey::Code(KeyCode::KeyV),
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => {
+                    v_pressed = state == ElementState::Pressed;
+                }
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::KeyboardInput {
+                            event:
+                                winit::event::KeyEvent {
+                                    state,
+                                    physical_key: PhysicalKey::Code(KeyCode::KeyB),
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => {
+                    b_pressed = state == ElementState::Pressed;
+                }
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::KeyboardInput {
+                            event:
+                                winit::event::KeyEvent {
+                                    state,
+                                    physical_key: PhysicalKey::Code(KeyCode::KeyP),
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => {
+                    if state == ElementState::Pressed && !p_pressed {
+                        p_pressed = true;
+                        // Get all preset names from the preset manager
+                        let preset_names = preset_manager.get_preset_names();
+
+                        // Find current index
+                        let current_index = preset_names
+                            .iter()
+                            .position(|name| name == &current_preset_name)
+                            .unwrap_or(0);
+
+                        // Calculate new index
+                        let new_index = if shift_pressed {
+                            if current_index == 0 {
+                                preset_names.len() - 1
+                            } else {
+                                current_index - 1
+                            }
+                        } else {
+                            (current_index + 1) % preset_names.len()
+                        };
+
+                        // Apply new preset
+                        if let Some(preset) = preset_manager.get_preset(&preset_names[new_index]) {
+                            settings = preset.settings.clone();
+                            current_preset_name = preset.name.clone();
+
+                            // Update uniform buffer with new settings
+                            let sim_size_uniform = SimSizeUniform::new(
+                                physical_width,
+                                physical_height,
+                                settings.pheromone_decay_factor,
+                                &settings,
+                            );
+                            queue.write_buffer(
+                                &sim_size_buffer,
+                                0,
+                                bytemuck::bytes_of(&sim_size_uniform),
+                            );
+                        }
+                    } else if state == ElementState::Released {
+                        p_pressed = false;
+                    }
+                }
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::KeyboardInput {
+                            event:
+                                winit::event::KeyEvent {
+                                    state: ElementState::Pressed,
+                                    physical_key,
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => {
+                    if t_pressed {
+                        match physical_key {
+                            PhysicalKey::Code(KeyCode::ArrowUp) => {
+                                let increment = if shift_pressed { 0.01 } else { 0.1 };
+                                settings.agent_turn_speed += increment;
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            PhysicalKey::Code(KeyCode::ArrowDown) => {
+                                let decrement = if shift_pressed { 0.01 } else { 0.1 };
+                                settings.agent_turn_speed =
+                                    (settings.agent_turn_speed - decrement).max(0.0);
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            _ => {}
+                        }
+                    } else if j_pressed {
+                        match physical_key {
+                            PhysicalKey::Code(KeyCode::ArrowUp) => {
+                                let increment = if shift_pressed { 0.01 } else { 0.1 };
+                                settings.agent_jitter += increment;
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            PhysicalKey::Code(KeyCode::ArrowDown) => {
+                                let decrement = if shift_pressed { 0.01 } else { 0.1 };
+                                settings.agent_jitter =
+                                    (settings.agent_jitter - decrement).max(0.0);
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            _ => {}
+                        }
+                    } else if s_pressed {
+                        match physical_key {
+                            PhysicalKey::Code(KeyCode::ArrowUp) => {
+                                let increment = if shift_pressed { 1.0 } else { 5.0 };
+                                settings.agent_speed_min += increment;
+                                settings.agent_speed_max += increment;
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            PhysicalKey::Code(KeyCode::ArrowDown) => {
+                                let decrement = if shift_pressed { 1.0 } else { 5.0 };
+                                settings.agent_speed_min =
+                                    (settings.agent_speed_min - decrement).max(0.0);
+                                settings.agent_speed_max =
+                                    (settings.agent_speed_max - decrement).max(0.0);
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            _ => {}
+                        }
+                    } else if a_pressed {
+                        match physical_key {
+                            PhysicalKey::Code(KeyCode::ArrowUp) => {
+                                let increment = if shift_pressed { 0.01 } else { 0.1 };
+                                settings.agent_sensor_angle += increment;
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            PhysicalKey::Code(KeyCode::ArrowDown) => {
+                                let decrement = if shift_pressed { 0.01 } else { 0.1 };
+                                settings.agent_sensor_angle =
+                                    (settings.agent_sensor_angle - decrement).max(0.0);
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            _ => {}
+                        }
+                    } else if d_pressed {
+                        match physical_key {
+                            PhysicalKey::Code(KeyCode::ArrowUp) => {
+                                let increment = if shift_pressed { 1.0 } else { 5.0 };
+                                settings.agent_sensor_distance += increment;
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            PhysicalKey::Code(KeyCode::ArrowDown) => {
+                                let decrement = if shift_pressed { 1.0 } else { 5.0 };
+                                settings.agent_sensor_distance =
+                                    (settings.agent_sensor_distance - decrement).max(0.0);
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            _ => {}
+                        }
+                    } else if f_pressed {
+                        match physical_key {
+                            PhysicalKey::Code(KeyCode::ArrowUp) => {
+                                let increment = if shift_pressed { 0.1 } else { 1.0 };
+                                settings.pheromone_deposition_amount += increment;
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            PhysicalKey::Code(KeyCode::ArrowDown) => {
+                                let decrement = if shift_pressed { 0.1 } else { 1.0 };
+                                settings.pheromone_deposition_amount =
+                                    (settings.pheromone_deposition_amount - decrement).max(0.0);
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            _ => {}
+                        }
+                    } else if v_pressed {
+                        match physical_key {
+                            PhysicalKey::Code(KeyCode::ArrowUp) => {
+                                let increment = if shift_pressed { 0.1 } else { 1.0 };
+                                settings.pheromone_decay_factor += increment;
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            PhysicalKey::Code(KeyCode::ArrowDown) => {
+                                let decrement = if shift_pressed { 0.1 } else { 1.0 };
+                                settings.pheromone_decay_factor =
+                                    (settings.pheromone_decay_factor - decrement).max(0.0);
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            _ => {}
+                        }
+                    } else if b_pressed {
+                        match physical_key {
+                            PhysicalKey::Code(KeyCode::ArrowUp) => {
+                                let increment = if shift_pressed { 0.01 } else { 0.1 };
+                                settings.pheromone_diffusion_rate = (settings.pheromone_diffusion_rate + increment).min(1.0);
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            PhysicalKey::Code(KeyCode::ArrowDown) => {
+                                let decrement = if shift_pressed { 0.01 } else { 0.1 };
+                                settings.pheromone_diffusion_rate = (settings.pheromone_diffusion_rate - decrement).max(0.0);
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        match physical_key {
+                            PhysicalKey::Code(KeyCode::Escape) => target.exit(),
+                            PhysicalKey::Code(KeyCode::KeyG) => {
+                                // Cycle LUTs (forward or backward based on shift key)
+                                if shift_pressed {
+                                    log::debug!("Cycle backwards");
+                                    // Cycle backwards
+                                    if current_lut_index == 0 {
+                                        current_lut_index = available_luts.len() - 1;
+                                    } else {
+                                        current_lut_index -= 1;
+                                    }
+                                } else {
+                                    log::debug!("Cycle forwards");
+                                    // Cycle forwards
+                                    current_lut_index =
+                                        (current_lut_index + 1) % available_luts.len();
+                                }
+
+                                // Load the new LUT data
+                                let lut_data = lut_manager
+                                    .load_lut(&available_luts[current_lut_index])
+                                    .expect("Failed to load LUT");
+
+                                // Update LUT buffer
+                                let mut lut_data_combined = Vec::with_capacity(768);
+                                lut_data_combined.extend_from_slice(&lut_data.red);
+                                lut_data_combined.extend_from_slice(&lut_data.green);
+                                lut_data_combined.extend_from_slice(&lut_data.blue);
+                                let lut_data_u32: Vec<u32> =
+                                    lut_data_combined.iter().map(|&x| x as u32).collect();
+                                queue.write_buffer(
+                                    &lut_buffer,
+                                    0,
+                                    bytemuck::cast_slice(&lut_data_u32),
+                                );
+
+                                // Update window title to show current LUT
+                                window.set_title(&format!(
+                                    "Physarum Simulation - LUT: {}",
+                                    available_luts[current_lut_index]
+                                ));
+                                last_lut_update = Instant::now();
+                            }
+                            PhysicalKey::Code(KeyCode::Slash) => {
+                                text_renderer.toggle_visibility();
+                            }
+                            PhysicalKey::Code(KeyCode::KeyC) => {
+                                // Clear the trail map by creating a new buffer filled with zeros
+                                let trail_map_size = (physical_width * physical_height) as usize;
+                                let clear_buffer = vec![0.0f32; trail_map_size];
+                                queue.write_buffer(
+                                    &trail_map_buffer,
+                                    0,
+                                    bytemuck::cast_slice(&clear_buffer),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 Event::WindowEvent {
                     event: WindowEvent::Resized(new_size),
@@ -871,79 +1034,38 @@ fn main() {
                     );
 
                     // Update uniform buffer with new size
-                    let sim_size_uniform = SimSizeUniform {
-                        width: physical_width,
-                        height: physical_height,
+                    let sim_size_uniform = SimSizeUniform::new(
+                        physical_width,
+                        physical_height,
                         decay_factor,
-                        agent_jitter: settings.agent_jitter,
-                        agent_speed_min: settings.agent_speed_min,
-                        agent_speed_max: settings.agent_speed_max,
-                        agent_turn_speed: settings.agent_turn_speed,
-                        agent_sensor_angle: settings.agent_sensor_angle,
-                        agent_sensor_distance: settings.agent_sensor_distance,
-                        diffusion_rate: settings.pheromone_diffusion_rate,
-                        pheromone_deposition_amount: settings.pheromone_deposition_amount,
-                        _pad: [0],
-                    };
+                        &settings,
+                    );
                     queue.write_buffer(&sim_size_buffer, 0, bytemuck::bytes_of(&sim_size_uniform));
 
-                    // Recreate the bind groups with new resources
-                    bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Compute Bind Group"),
-                        layout: &bind_group_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: agent_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: trail_map_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: sim_size_buffer.as_entire_binding(),
-                            },
-                        ],
-                    });
+                    // Update bind groups with new resources
+                    bind_group_manager.update_compute_bind_group(
+                        &device,
+                        &pipeline_manager.compute_bind_group_layout,
+                        &agent_buffer,
+                        &trail_map_buffer,
+                        &sim_size_buffer,
+                    );
 
-                    display_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Display Compute Bind Group"),
-                        layout: &display_bind_group_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: trail_map_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::TextureView(&display_view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: sim_size_buffer.as_entire_binding(),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: lut_buffer.as_entire_binding(),
-                            },
-                        ],
-                    });
+                    bind_group_manager.update_display_bind_group(
+                        &device,
+                        &pipeline_manager.display_bind_group_layout,
+                        &trail_map_buffer,
+                        &display_view,
+                        &sim_size_buffer,
+                        &lut_buffer,
+                    );
 
-                    render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Render Bind Group"),
-                        layout: &render_bind_group_layout,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(&display_view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&display_sampler),
-                            },
-                        ],
-                    });
+                    bind_group_manager.update_render_bind_group(
+                        &device,
+                        &pipeline_manager.render_bind_group_layout,
+                        &display_view,
+                        &display_sampler,
+                    );
                 }
                 Event::AboutToWait => {
                     // Calculate FPS
@@ -954,12 +1076,26 @@ fn main() {
                     if elapsed >= fps_update_interval {
                         let fps = frame_count as f64 / elapsed.as_secs_f64();
                         let frame_time = (current_time - last_frame_time).as_secs_f64() * 1000.0;
-                        window.set_title(&format!(
-                            "Physarum Simulation - FPS: {:.1} ({:.1}ms)",
-                            fps, frame_time
-                        ));
+
+                        // Only update title with FPS if LUT name display duration has passed
+                        if current_time - last_lut_update >= lut_display_duration {
+                            window.set_title(&format!(
+                                "Physarum Simulation - FPS: {:.1} ({:.1}ms)",
+                                fps, frame_time
+                            ));
+                        }
                         frame_count = 0;
                         last_fps_update = current_time;
+                    }
+                    last_frame_time = current_time;
+
+                    // Update help text at 30fps
+                    let current_time = Instant::now();
+                    if current_time - last_help_update >= help_update_interval {
+                        // Calculate current FPS and frame time
+                        let fps =
+                            frame_count as f64 / (current_time - last_fps_update).as_secs_f64();
+                        let frame_time = (current_time - last_frame_time).as_secs_f64() * 1000.0;
 
                         // Update help text
                         let help_text = {
@@ -981,22 +1117,26 @@ fn main() {
 
                             format!(
                                 "FPS:\t{fps:.1} ({frame_time:.1}ms)\n\
+                                (P) Preset:\t{current_preset_name}\n\
                                 Agents:\t{agent_count}\n\
-                                Decay:\t{decay_factor}\n\
-                                Diffusion:\t{diffusion_rate}\n\
-                                Deposition:\t{deposition_amount}\n\
-                                Agent Jitter:\t{agent_jitter}\n\
-                                Speed Range:\t{agent_speed_min}-{agent_speed_max}\n\
-                                Turn Speed:\t{agent_turn_speed}\n\
-                                Sensor Angle:\t{agent_sensor_angle}\n\
-                                Sensor Distance:\t{agent_sensor_distance}\n\
-                                Press / to toggle help",
+                                (V) Decay:\t{decay_factor}\n\
+                                (B) Diffusion:\t{diffusion_rate}\n\
+                                (F) Deposition:\t{deposition_amount}\n\
+                                (J) Jitter:\t{agent_jitter}\n\
+                                (S) Speed:\t{agent_speed_min}-{agent_speed_max}\n\
+                                (T) Turn:\t{agent_turn_speed}\n\
+                                (A) Angle:\t{agent_sensor_angle}\n\
+                                (D) Distance:\t{agent_sensor_distance}\n\
+                                Press / to toggle help\n\
+                                Press C to clear trail map\n\
+                                Press G to cycle LUTs (Shift+G for reverse)\n\
+                                Hold any key + arrows to adjust its setting (Shift for fine control)",
                             )
                         };
 
                         text_renderer.render_text(&help_text, &font, window.inner_size());
+                        last_help_update = current_time;
                     }
-                    last_frame_time = current_time;
 
                     // Run the compute pass to update agents and trail map
                     let mut encoder = device
@@ -1007,14 +1147,14 @@ fn main() {
                                 label: None,
                                 timestamp_writes: None,
                             });
-                        compute_pass.set_pipeline(&compute_pipeline);
-                        compute_pass.set_bind_group(0, &bind_group, &[]);
+                        compute_pass.set_pipeline(&pipeline_manager.compute_pipeline);
+                        compute_pass.set_bind_group(0, &bind_group_manager.compute_bind_group, &[]);
                         // Split the workgroups across multiple dimensions
                         let workgroup_size = 64u32;
                         let total_workgroups =
-                            (agent_count as u32 + workgroup_size - 1) / workgroup_size;
+                            (agent_count as u32).div_ceil(workgroup_size);
                         let workgroups_x = total_workgroups.min(65535);
-                        let workgroups_y = (total_workgroups + workgroups_x - 1) / workgroups_x;
+                        let workgroups_y = total_workgroups.div_ceil(workgroups_x);
                         compute_pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
                     }
                     queue.submit(Some(encoder.finish()));
@@ -1028,8 +1168,8 @@ fn main() {
                                 label: Some("Decay Pass"),
                                 timestamp_writes: None,
                             });
-                        decay_pass.set_pipeline(&decay_pipeline);
-                        decay_pass.set_bind_group(0, &bind_group, &[]);
+                        decay_pass.set_pipeline(&pipeline_manager.decay_pipeline);
+                        decay_pass.set_bind_group(0, &bind_group_manager.compute_bind_group, &[]);
                         let workgroup_size = 16u32;
                         let dispatch_x = physical_width.div_ceil(workgroup_size);
                         let dispatch_y = physical_height.div_ceil(workgroup_size);
@@ -1046,8 +1186,8 @@ fn main() {
                                 label: None,
                                 timestamp_writes: None,
                             });
-                        compute_pass.set_pipeline(&display_pipeline);
-                        compute_pass.set_bind_group(0, &display_bind_group, &[]);
+                        compute_pass.set_pipeline(&pipeline_manager.display_pipeline);
+                        compute_pass.set_bind_group(0, &bind_group_manager.display_bind_group, &[]);
                         let workgroup_size = 16u32;
                         let dispatch_x = physical_width.div_ceil(workgroup_size);
                         let dispatch_y = physical_height.div_ceil(workgroup_size);
@@ -1063,8 +1203,8 @@ fn main() {
                             label: Some("Diffuse Pass"),
                             timestamp_writes: None,
                         });
-                    diffuse_pass.set_pipeline(&diffuse_pipeline);
-                    diffuse_pass.set_bind_group(0, &bind_group, &[]);
+                    diffuse_pass.set_pipeline(&pipeline_manager.diffuse_pipeline);
+                    diffuse_pass.set_bind_group(0, &bind_group_manager.compute_bind_group, &[]);
                     diffuse_pass.dispatch_workgroups(
                         (physical_width + 15) / 16,
                         (physical_height + 15) / 16,
@@ -1096,13 +1236,13 @@ fn main() {
                                 timestamp_writes: None,
                                 occlusion_query_set: None,
                             });
-                        render_pass.set_pipeline(&render_pipeline);
-                        render_pass.set_bind_group(0, &render_bind_group, &[]);
+                        render_pass.set_pipeline(&pipeline_manager.render_pipeline);
+                        render_pass.set_bind_group(0, &bind_group_manager.render_bind_group, &[]);
                         render_pass.draw(0..6, 0..1);
 
                         // Draw text overlay
                         if let Some(text_bind_group) = text_renderer.get_bind_group() {
-                            render_pass.set_pipeline(&text_pipeline);
+                            render_pass.set_pipeline(&pipeline_manager.text_pipeline);
                             render_pass.set_bind_group(0, text_bind_group, &[]);
                             render_pass.draw(0..6, 0..1);
                         }

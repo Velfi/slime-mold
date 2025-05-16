@@ -142,7 +142,7 @@ fn diffuse_trail(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     let idx = y * i32(sim_size.width) + x;
-    let diffusion_rate = sim_size.diffusion_rate;
+    let diffusion_rate = clamp(sim_size.diffusion_rate, 0.0, 1.0);
     
     // Get neighboring values
     var sum = trail_map[idx];

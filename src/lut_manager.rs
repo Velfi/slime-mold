@@ -80,8 +80,69 @@ lazy_static::lazy_static! {
         "MATPLOTLIB_tab20b_r.lut",
         "MATPLOTLIB_tab20c_r.lut",
         "MATPLOTLIB_terrain_r.lut",
-        "MATPLOTLIB_winter_r.lut"
-        // Note: Add other LUTs as needed
+        "MATPLOTLIB_winter_r.lut",
+        "KTZ_bt_Brick.lut",
+        "KTZ_bt_Teal.lut",
+        "KTZ_bw_Avada.lut",
+        "KTZ_bw_CityNight.lut",
+        "KTZ_bw_Coral.lut",
+        "KTZ_bw_DarkGold.lut",
+        "KTZ_bw_DeepBlush.lut",
+        "KTZ_bw_DeepLime.lut",
+        "KTZ_bw_Div_Orange.lut",
+        "KTZ_bw_Ember.lut",
+        "KTZ_bw_Incendio.lut",
+        "KTZ_bw_IndiGlow.lut",
+        "KTZ_bw_Iris.lut",
+        "KTZ_bw_kawa.lut",
+        "KTZ_bw_Lagoon.lut",
+        "KTZ_bw_Lavender.lut",
+        "KTZ_bw_Moon.lut",
+        "KTZ_bw_NavyGold.lut",
+        "KTZ_bw_Nebula.lut",
+        "KTZ_bw_NightRose.lut",
+        "KTZ_bw_PinkShui.lut",
+        "KTZ_bw_Sakura.lut",
+        "KTZ_bw_Saphira.lut",
+        "KTZ_bw_Scarlet.lut",
+        "KTZ_bw_SeaWeed.lut",
+        "KTZ_bw_Spectral.lut",
+        "KTZ_bw_Sunrise.lut",
+        "KTZ_bw_TealHot.lut",
+        "KTZ_Campfire.lut",
+        "KTZ_color_BCO.lut",
+        "KTZ_color_BOG.lut",
+        "KTZ_color_Gazoil.lut",
+        "KTZ_color_POC.lut",
+        "KTZ_color_POCY.lut",
+        "KTZ_Div_Cyan.lut",
+        "KTZ_Div_Red.lut",
+        "KTZ_Grey_Div_Green.lut",
+        "KTZ_Grey_Div_Orange.lut",
+        "KTZ_Grey_To_Black.lut",
+        "KTZ_inv_Noice_Blue.lut",
+        "KTZ_inv_Noice_Orange.lut",
+        "KTZ_inv_Owl_Red.lut",
+        "KTZ_inv_Owl_Teal.lut",
+        "KTZ_k_Blue.lut",
+        "KTZ_k_Green.lut",
+        "KTZ_k_Magenta.lut",
+        "KTZ_k_Orange.lut",
+        "KTZ_Klein_Blue.lut",
+        "KTZ_Klein_Gold.lut",
+        "KTZ_Klein_Pink.lut",
+        "KTZ_Noice_Blue.lut",
+        "KTZ_Noice_Cyan.lut",
+        "KTZ_Noice_Green.lut",
+        "KTZ_Noice_Magenta.lut",
+        "KTZ_Noice_Orange.lut",
+        "KTZ_Noice_Red.lut",
+        "KTZ_poc_Cyan.lut",
+        "KTZ_poc_Orange.lut",
+        "KTZ_poc_Purple.lut",
+        "KTZ_rgb_Blue.lut",
+        "KTZ_rgb_Green.lut",
+        "KTZ_rgb_Red.lut"
     );
 }
 
@@ -93,7 +154,9 @@ impl LutManager {
     }
 
     pub fn get_available_luts(&self) -> Vec<String> {
-        EMBEDDED_LUTS.keys().map(|&name| name.to_string()).collect()
+        let mut luts: Vec<String> = EMBEDDED_LUTS.keys().map(|&name| name.to_string()).collect();
+        luts.sort();
+        luts
     }
 
     pub fn load_lut(&self, name: &str) -> io::Result<LutData> {

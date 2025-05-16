@@ -1,5 +1,3 @@
-use log::info;
-use serde::Deserialize;
 use std::ops::Range;
 
 // General settings
@@ -8,25 +6,23 @@ pub const DEFAULT_HEIGHT: u32 = 900;
 pub const DEFAULT_IS_FULLSCREEN: bool = false;
 
 // Agent settings
-pub const AGENT_COUNT: usize = 10000;
+pub const AGENT_COUNT: usize = 1_000_000;
 pub const AGENT_SPEED_MIN: f32 = 30.0;
 pub const AGENT_SPEED_MAX: f32 = 50.0;
-pub const AGENT_TURN_SPEED: f32 = 10.0;
+pub const AGENT_TURN_SPEED: f32 = 6.5;
 pub const AGENT_POSSIBLE_STARTING_HEADINGS: std::ops::Range<f32> = 0.0..360.0;
 pub const DEPOSITION_AMOUNT: f32 = 1.0;
-pub const AGENT_JITTER: f32 = 10.0;
-pub const AGENT_SENSOR_ANGLE: f32 = 0.5;
-pub const AGENT_SENSOR_DISTANCE: f32 = 9.0;
+pub const AGENT_JITTER: f32 = 0.0;
+pub const AGENT_SENSOR_ANGLE: f32 = 0.3;
+pub const AGENT_SENSOR_DISTANCE: f32 = 20.0;
 
 // Pheromone settings
 /// Represents the rate at which pheromone signals disappear. A typical decay factor is 1/100 the rate of deposition
-pub const DECAY_FACTOR: f32 = 0.01;
+pub const DECAY_FACTOR: f32 = 10.0;
 /// Represents how quickly pheromones diffuse to neighboring cells
-pub const DIFFUSION_RATE: f32 = 0.1;
-pub const DEFAULT_SETTINGS_FILE: &str = "simulation_settings.toml";
+pub const DIFFUSION_RATE: f32 = 1.0;
 
-#[derive(Debug, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct Settings {
     pub agent_count: usize,
     pub agent_jitter: f32,
@@ -62,21 +58,5 @@ impl Default for Settings {
             agent_sensor_angle: AGENT_SENSOR_ANGLE,
             agent_sensor_distance: AGENT_SENSOR_DISTANCE,
         }
-    }
-}
-
-impl Settings {
-    pub fn load_from_file(settings_file_name: &str) -> anyhow::Result<Self> {
-        let settings = config::Config::builder()
-            .add_source(config::File::with_name(settings_file_name))
-            .build()?;
-        let settings = settings.try_deserialize()?;
-
-        info!(
-            "successfully loaded settings from '{}'",
-            &settings_file_name
-        );
-
-        Ok(settings)
     }
 }
