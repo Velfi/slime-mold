@@ -1,6 +1,6 @@
 [package]
 name = "slime-mold"
-version = "1.0.0"
+version = "1.0.1"
 authors = ["Zelda Hessler <zelda.hessler@tempus.com>"]
 edition = "2024"
 description = "A simulation of slime mold"
