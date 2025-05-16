@@ -1,8 +1,9 @@
 [package]
-name = "slime"
-version = "0.2.0"
+name = "slime-mold"
+version = "1.0.0"
 authors = ["Zelda Hessler <zelda.hessler@tempus.com>"]
 edition = "2024"
+description = "A simulation of slime mold"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

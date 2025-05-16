@@ -1,9 +1,9 @@
 use bytemuck::cast_slice_mut;
 use log::info;
 use num_format::{Locale, ToFormattedString};
-use slime::lut_manager::LutManager;
-use slime::presets::init_preset_manager;
-use slime::settings::Settings;
+use slime_mold::lut_manager::LutManager;
+use slime_mold::presets::init_preset_manager;
+use slime_mold::settings::Settings;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
