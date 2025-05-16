@@ -190,8 +190,6 @@ fn main() {
     let mut a_pressed = false;
     // Track D key state for sensor distance
     let mut d_pressed = false;
-    // Track F key state for LUT reversal
-    let mut f_pressed = false;
     // Track R key state for deposition amount
     let mut r_pressed = false;
     // Track V key state for decay factor
@@ -237,8 +235,8 @@ fn main() {
             label: None,
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits {
-                max_buffer_size: 1024 * 1024 * 1024,                 // 1024MB
-                max_storage_buffer_binding_size: 1024 * 1024 * 1024, // 1024MB
+                max_buffer_size: u32::MAX as u64, 
+                max_storage_buffer_binding_size: u32::MAX,
                 ..wgpu::Limits::default()
             },
         },

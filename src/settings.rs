@@ -6,7 +6,7 @@ pub const DEFAULT_HEIGHT: u32 = 900;
 pub const DEFAULT_IS_FULLSCREEN: bool = false;
 
 // Agent settings
-pub const AGENT_COUNT: usize = 1_000_000;
+pub const AGENT_COUNT: usize = 10_000_000;
 pub const AGENT_SPEED_MIN: f32 = 30.0;
 pub const AGENT_SPEED_MAX: f32 = 50.0;
 pub const AGENT_TURN_SPEED: f32 = 6.5;
