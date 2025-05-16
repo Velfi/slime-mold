@@ -148,6 +148,8 @@ fn main() {
     let mut v_pressed = false;
     // Track B key state for diffusion rate
     let mut b_pressed = false;
+    // Track N key state for agent count
+    let mut n_pressed = false;
     // Track P key state to prevent holding
     let mut p_pressed = false;
 
@@ -227,7 +229,7 @@ fn main() {
     surface.configure(&device, &config);
 
     // Create the simulation state (agent buffer and trail map)
-    let agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+    let mut agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Agent Buffer"),
         size: (agent_count * 4 * std::mem::size_of::<f32>()) as u64,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
@@ -498,6 +500,21 @@ fn main() {
                     ..
                 } => {
                     b_pressed = state == ElementState::Pressed;
+                }
+                Event::WindowEvent {
+                    event:
+                        WindowEvent::KeyboardInput {
+                            event:
+                                winit::event::KeyEvent {
+                                    state,
+                                    physical_key: PhysicalKey::Code(KeyCode::KeyN),
+                                    ..
+                                },
+                            ..
+                        },
+                    ..
+                } => {
+                    n_pressed = state == ElementState::Pressed;
                 }
                 Event::WindowEvent {
                     event:
@@ -819,6 +836,106 @@ fn main() {
                             }
                             _ => {}
                         }
+                    } else if n_pressed {
+                        match physical_key {
+                            PhysicalKey::Code(KeyCode::ArrowUp) => {
+                                let increment = if shift_pressed { 100_000 } else { 1_000_000 };
+                                settings.agent_count += increment;
+                                // Resize agent buffer
+                                let agent_buf_size = (settings.agent_count * 4 * std::mem::size_of::<f32>()) as u64;
+                                let new_agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                                    label: Some("Agent Buffer"),
+                                    size: agent_buf_size,
+                                    usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+                                    mapped_at_creation: true,
+                                });
+                                // Initialize new agents with random positions and angles
+                                {
+                                    let mut agent_data = new_agent_buffer.slice(..).get_mapped_range_mut();
+                                    let agent_f32: &mut [f32] = cast_slice_mut(&mut agent_data);
+                                    for i in 0..settings.agent_count {
+                                        let offset = i * 4;
+                                        agent_f32[offset] = rand::random::<f32>() * physical_width as f32;
+                                        agent_f32[offset + 1] = rand::random::<f32>() * physical_height as f32;
+                                        agent_f32[offset + 2] = rand::random::<f32>() * 2.0 * std::f32::consts::PI;
+                                        let speed_range = settings.agent_speed_max - settings.agent_speed_min;
+                                        agent_f32[offset + 3] = settings.agent_speed_min + rand::random::<f32>() * speed_range;
+                                    }
+                                }
+                                new_agent_buffer.unmap();
+                                
+                                // Update bind groups with new agent buffer
+                                bind_group_manager.update_compute_bind_group(
+                                    &device,
+                                    &pipeline_manager.compute_bind_group_layout,
+                                    &new_agent_buffer,
+                                    &trail_map_buffer,
+                                    &sim_size_buffer,
+                                );
+                                
+                                // Replace old buffer with new one
+                                agent_buffer = new_agent_buffer;
+                                
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            PhysicalKey::Code(KeyCode::ArrowDown) => {
+                                let decrement = if shift_pressed { 100_000 } else { 1_000_000 };
+                                settings.agent_count = (settings.agent_count.saturating_sub(decrement)).max(1);
+                                // Resize agent buffer
+                                let agent_buf_size = (settings.agent_count * 4 * std::mem::size_of::<f32>()) as u64;
+                                let new_agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                                    label: Some("Agent Buffer"),
+                                    size: agent_buf_size,
+                                    usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+                                    mapped_at_creation: true,
+                                });
+                                // Initialize new agents with random positions and angles
+                                {
+                                    let mut agent_data = new_agent_buffer.slice(..).get_mapped_range_mut();
+                                    let agent_f32: &mut [f32] = cast_slice_mut(&mut agent_data);
+                                    for i in 0..settings.agent_count {
+                                        let offset = i * 4;
+                                        agent_f32[offset] = rand::random::<f32>() * physical_width as f32;
+                                        agent_f32[offset + 1] = rand::random::<f32>() * physical_height as f32;
+                                        agent_f32[offset + 2] = rand::random::<f32>() * 2.0 * std::f32::consts::PI;
+                                        let speed_range = settings.agent_speed_max - settings.agent_speed_min;
+                                        agent_f32[offset + 3] = settings.agent_speed_min + rand::random::<f32>() * speed_range;
+                                    }
+                                }
+                                new_agent_buffer.unmap();
+                                
+                                // Update bind groups with new agent buffer
+                                bind_group_manager.update_compute_bind_group(
+                                    &device,
+                                    &pipeline_manager.compute_bind_group_layout,
+                                    &new_agent_buffer,
+                                    &trail_map_buffer,
+                                    &sim_size_buffer,
+                                );
+                                
+                                // Replace old buffer with new one
+                                agent_buffer = new_agent_buffer;
+                                
+                                update_settings(
+                                    &mut settings,
+                                    &mut current_preset_name,
+                                    &sim_size_buffer,
+                                    &queue,
+                                    physical_width,
+                                    physical_height,
+                                    decay_factor,
+                                );
+                            }
+                            _ => {}
+                        }
                     } else {
                         match physical_key {
                             PhysicalKey::Code(KeyCode::Escape) => target.exit(),
@@ -1118,7 +1235,7 @@ fn main() {
                             format!(
                                 "FPS:\t{fps:.1} ({frame_time:.1}ms)\n\
                                 (P) Preset:\t{current_preset_name}\n\
-                                Agents:\t{agent_count}\n\
+                                (N) Agents:\t{agent_count}\n\
                                 (V) Decay:\t{decay_factor}\n\
                                 (B) Diffusion:\t{diffusion_rate}\n\
                                 (F) Deposition:\t{deposition_amount}\n\
