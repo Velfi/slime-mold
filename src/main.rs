@@ -536,7 +536,37 @@ fn main() {
                         },
                     ..
                 } => {
-                    f_pressed = state == ElementState::Pressed;
+                    if state == ElementState::Pressed {
+                        // LUT reversal logic
+                        let mut lut_data = lut_manager
+                            .load_lut(&available_luts[current_lut_index])
+                            .expect("Failed to load LUT");
+                        if lut_reversed {
+                            lut_data = lut_manager
+                                .load_lut(&available_luts[current_lut_index])
+                                .expect("Failed to load LUT");
+                        } else {
+                            lut_data.reverse();
+                        }
+                        lut_reversed = !lut_reversed;
+                        let mut lut_data_combined = Vec::with_capacity(768);
+                        lut_data_combined.extend_from_slice(&lut_data.red);
+                        lut_data_combined.extend_from_slice(&lut_data.green);
+                        lut_data_combined.extend_from_slice(&lut_data.blue);
+                        let lut_data_u32: Vec<u32> =
+                            lut_data_combined.iter().map(|&x| x as u32).collect();
+                        queue.write_buffer(
+                            &lut_buffer,
+                            0,
+                            bytemuck::cast_slice(&lut_data_u32),
+                        );
+                        window.set_title(&format!(
+                            "Physarum Simulation - LUT: {}{}",
+                            available_luts[current_lut_index],
+                            if lut_reversed { " (Reversed)" } else { "" }
+                        ));
+                        last_lut_update = Instant::now();
+                    }
                 }
                 Event::WindowEvent {
                     event:
@@ -912,41 +942,6 @@ fn main() {
                                     physical_height,
                                     decay_factor,
                                 );
-                            }
-                            _ => {}
-                        }
-                    } else if f_pressed {
-                        match physical_key {
-                            PhysicalKey::Code(KeyCode::KeyF) => {
-                                // Only toggle on key press
-                                let mut lut_data = lut_manager
-                                    .load_lut(&available_luts[current_lut_index])
-                                    .expect("Failed to load LUT");
-                                if lut_reversed {
-                                    lut_data = lut_manager
-                                        .load_lut(&available_luts[current_lut_index])
-                                        .expect("Failed to load LUT");
-                                } else {
-                                    lut_data.reverse();
-                                }
-                                lut_reversed = !lut_reversed;
-                                let mut lut_data_combined = Vec::with_capacity(768);
-                                lut_data_combined.extend_from_slice(&lut_data.red);
-                                lut_data_combined.extend_from_slice(&lut_data.green);
-                                lut_data_combined.extend_from_slice(&lut_data.blue);
-                                let lut_data_u32: Vec<u32> =
-                                    lut_data_combined.iter().map(|&x| x as u32).collect();
-                                queue.write_buffer(
-                                    &lut_buffer,
-                                    0,
-                                    bytemuck::cast_slice(&lut_data_u32),
-                                );
-                                window.set_title(&format!(
-                                    "Physarum Simulation - LUT: {}{}",
-                                    available_luts[current_lut_index],
-                                    if lut_reversed { " (Reversed)" } else { "" }
-                                ));
-                                last_lut_update = Instant::now();
                             }
                             _ => {}
                         }
