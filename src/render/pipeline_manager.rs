@@ -1,4 +1,4 @@
-use crate::shader_manager::ShaderManager;
+use crate::render::shader_manager::ShaderManager;
 use wgpu::{
     BindGroupLayout, ComputePipeline, Device, PipelineLayout, PipelineLayoutDescriptor,
     RenderPipeline, RenderPipelineDescriptor, ShaderModule,

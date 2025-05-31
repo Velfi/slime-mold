@@ -14,15 +14,15 @@ impl ShaderManager {
             compute_shader: Self::create_shader(
                 device,
                 "Compute Shader",
-                include_str!("compute.wgsl"),
+                include_str!("../shaders/compute.wgsl"),
             ),
             display_shader: Self::create_shader(
                 device,
                 "Display Compute Shader",
-                include_str!("display.wgsl"),
+                include_str!("../shaders/display.wgsl"),
             ),
-            quad_shader: Self::create_shader(device, "Quad Shader", include_str!("quad.wgsl")),
-            text_shader: Self::create_shader(device, "Text Shader", include_str!("text.wgsl")),
+            quad_shader: Self::create_shader(device, "Quad Shader", include_str!("../shaders/quad.wgsl")),
+            text_shader: Self::create_shader(device, "Text Shader", include_str!("../shaders/text.wgsl")),
         }
     }
 

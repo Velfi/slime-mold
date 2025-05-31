@@ -39,7 +39,7 @@ cargo run --release
 - `D`: Adjust agent sensor distance (Shift+D for fine control)
 - `G`: Cycle through LUTs (Shift+G for reverse)
 - `F`: Toggle LUT reversal
-- `C`: Clear trail map
+- `C`: Reset the simulation
 - `/`: Toggle help text
 - `Esc`: Exit
 

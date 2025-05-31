@@ -4,6 +4,14 @@ use num_format::{Locale, ToFormattedString};
 use slime_mold::lut_manager::LutManager;
 use slime_mold::presets::init_preset_manager;
 use slime_mold::settings::Settings;
+use slime_mold::simulation::SimSizeUniform;
+use slime_mold::utils::format_float_dynamic;
+use slime_mold::render::{
+    bind_group_manager::BindGroupManager,
+    pipeline_manager::PipelineManager,
+    shader_manager::ShaderManager,
+    text_renderer::TextRenderer,
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use wgpu::util::DeviceExt;
@@ -15,70 +23,6 @@ use winit::{
     window::WindowBuilder,
 };
 use winit_input_helper::WinitInputHelper;
-
-mod bind_group_manager;
-mod pipeline_manager;
-mod shader_manager;
-mod text_renderer;
-
-use bind_group_manager::BindGroupManager;
-use pipeline_manager::PipelineManager;
-use shader_manager::ShaderManager;
-use text_renderer::TextRenderer;
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct SimSizeUniform {
-    width: u32,
-    height: u32,
-    decay_factor: f32,
-    agent_jitter: f32,
-    agent_speed_min: f32,
-    agent_speed_max: f32,
-    agent_turn_speed: f32,
-    agent_sensor_angle: f32,
-    agent_sensor_distance: f32,
-    diffusion_rate: f32,
-    pheromone_deposition_amount: f32,
-    blur_radius: f32,
-    blur_sigma: f32,
-    _pad: [u32; 1],
-}
-
-impl SimSizeUniform {
-    fn new(width: u32, height: u32, decay_factor: f32, settings: &Settings) -> Self {
-        Self {
-            width,
-            height,
-            decay_factor,
-            agent_jitter: settings.agent_jitter,
-            agent_speed_min: settings.agent_speed_min,
-            agent_speed_max: settings.agent_speed_max,
-            agent_turn_speed: settings.agent_turn_speed,
-            agent_sensor_angle: settings.agent_sensor_angle,
-            agent_sensor_distance: settings.agent_sensor_distance,
-            diffusion_rate: settings.pheromone_diffusion_rate,
-            pheromone_deposition_amount: settings.pheromone_deposition_amount,
-            blur_radius: settings.blur_radius,
-            blur_sigma: settings.blur_sigma,
-            _pad: [0],
-        }
-    }
-}
-
-fn format_float_dynamic(val: f32) -> String {
-    let s = format!("{}", val);
-    if s.contains('.') {
-        let s = s.trim_end_matches('0').trim_end_matches('.');
-        if s.is_empty() {
-            "0.0".to_string()
-        } else {
-            s.to_string()
-        }
-    } else {
-        format!("{}.0", s)
-    }
-}
 
 fn update_settings(
     settings: &mut Settings,
@@ -195,6 +139,16 @@ fn main() {
     // LUT name display duration
     let lut_display_duration = Duration::from_secs(3);
     let mut last_lut_update = Instant::now();
+    // Agent count debounce timer
+    let agent_count_debounce_duration = Duration::from_millis(500);
+    let mut last_agent_count_change = Instant::now();
+    let mut pending_agent_count = settings.agent_count;
+
+    // Agent speed debounce timers
+    let mut last_min_speed_change = Instant::now();
+    let mut last_max_speed_change = Instant::now();
+    let mut pending_min_speed = settings.agent_speed_min;
+    let mut pending_max_speed = settings.agent_speed_max;
 
     // After creating the window, wrap it in Arc for cheap cloning
     let window = Arc::new(window);
@@ -232,6 +186,10 @@ fn main() {
     // Get device limits for texture size
     let max_texture_dimension = device.limits().max_texture_dimension_2d;
     info!("Max texture dimension: {}", max_texture_dimension);
+
+    // Calculate max agents based on device buffer limits
+    let max_agents = (device.limits().max_buffer_size / (4 * std::mem::size_of::<f32>() as u64)) as usize;
+    info!("Max agents based on device limits: {}", max_agents);
 
     // Use settings for window and simulation parameters
     let logical_width = settings.window_width;
@@ -381,7 +339,7 @@ fn main() {
     );
 
     // Load font
-    let font_data = include_bytes!("../Texturina-VariableFont_opsz,wght.ttf");
+    let font_data = include_bytes!("../ZeldaSans-Regular.otf");
     let font =
         fontdue::Font::from_bytes(font_data as &[u8], fontdue::FontSettings::default()).unwrap();
 
@@ -461,85 +419,24 @@ fn main() {
                 if input.key_held(KeyCode::KeyS) {
                     if input.key_pressed(KeyCode::ArrowUp) {
                         let increment = if shift_pressed { 1.0 } else { 5.0 };
-                        settings.agent_speed_min += increment;
-                        reassign_agent_speeds(
-                            &agent_buffer,
-                            &device,
-                            &queue,
-                            settings.agent_count,
-                            settings.agent_speed_min,
-                            settings.agent_speed_max,
-                        );
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
+                        pending_min_speed = (pending_min_speed + increment).min(settings.agent_speed_max);
+                        last_min_speed_change = Instant::now();
                     } else if input.key_pressed(KeyCode::ArrowDown) {
                         let decrement = if shift_pressed { 1.0 } else { 5.0 };
-                        settings.agent_speed_min = (settings.agent_speed_min - decrement).max(0.0);
-                        reassign_agent_speeds(
-                            &agent_buffer,
-                            &device,
-                            &queue,
-                            settings.agent_count,
-                            settings.agent_speed_min,
-                            settings.agent_speed_max,
-                        );
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
+                        pending_min_speed = (pending_min_speed - decrement).max(0.0);
+                        last_min_speed_change = Instant::now();
                     }
                 }
 
                 if input.key_held(KeyCode::KeyX) {
                     if input.key_pressed(KeyCode::ArrowUp) {
                         let increment = if shift_pressed { 1.0 } else { 5.0 };
-                        settings.agent_speed_max += increment;
-                        reassign_agent_speeds(
-                            &agent_buffer,
-                            &device,
-                            &queue,
-                            settings.agent_count,
-                            settings.agent_speed_min,
-                            settings.agent_speed_max,
-                        );
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
+                        pending_max_speed += increment;
+                        last_max_speed_change = Instant::now();
                     } else if input.key_pressed(KeyCode::ArrowDown) {
                         let decrement = if shift_pressed { 1.0 } else { 5.0 };
-                        settings.agent_speed_max =
-                            (settings.agent_speed_max - decrement).max(settings.agent_speed_min);
-                        reassign_agent_speeds(
-                            &agent_buffer,
-                            &device,
-                            &queue,
-                            settings.agent_count,
-                            settings.agent_speed_min,
-                            settings.agent_speed_max,
-                        );
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
+                        pending_max_speed = (pending_max_speed - decrement).max(pending_min_speed);
+                        last_max_speed_change = Instant::now();
                     }
                 }
 
@@ -682,111 +579,12 @@ fn main() {
                 if input.key_held(KeyCode::KeyN) {
                     if input.key_pressed(KeyCode::ArrowUp) {
                         let increment = if shift_pressed { 100_000 } else { 1_000_000 };
-                        settings.agent_count += increment;
-                        // Resize agent buffer
-                        let agent_buf_size =
-                            (settings.agent_count * 4 * std::mem::size_of::<f32>()) as u64;
-                        let new_agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("Agent Buffer"),
-                            size: agent_buf_size,
-                            usage: BufferUsages::STORAGE
-                                | BufferUsages::COPY_SRC
-                                | BufferUsages::COPY_DST,
-                            mapped_at_creation: true,
-                        });
-                        // Initialize new agents with random positions and angles
-                        {
-                            let mut agent_data = new_agent_buffer.slice(..).get_mapped_range_mut();
-                            let agent_f32: &mut [f32] = cast_slice_mut(&mut agent_data);
-                            for i in 0..settings.agent_count {
-                                let offset = i * 4;
-                                agent_f32[offset] = rand::random::<f32>() * physical_width as f32;
-                                agent_f32[offset + 1] =
-                                    rand::random::<f32>() * physical_height as f32;
-                                agent_f32[offset + 2] =
-                                    rand::random::<f32>() * 2.0 * std::f32::consts::PI;
-                                let speed_range =
-                                    settings.agent_speed_max - settings.agent_speed_min;
-                                agent_f32[offset + 3] =
-                                    settings.agent_speed_min + rand::random::<f32>() * speed_range;
-                            }
-                        }
-                        new_agent_buffer.unmap();
-
-                        // Update bind groups with new agent buffer
-                        bind_group_manager.update_compute_bind_group(
-                            &device,
-                            &pipeline_manager.compute_bind_group_layout,
-                            &new_agent_buffer,
-                            &trail_map_buffer,
-                            &sim_size_buffer,
-                        );
-
-                        // Replace old buffer with new one
-                        agent_buffer = new_agent_buffer;
-
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
+                        pending_agent_count = (pending_agent_count + increment).min(max_agents);
+                        last_agent_count_change = Instant::now();
                     } else if input.key_pressed(KeyCode::ArrowDown) {
                         let decrement = if shift_pressed { 100_000 } else { 1_000_000 };
-                        settings.agent_count =
-                            (settings.agent_count.saturating_sub(decrement)).max(1);
-                        // Resize agent buffer
-                        let agent_buf_size =
-                            (settings.agent_count * 4 * std::mem::size_of::<f32>()) as u64;
-                        let new_agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("Agent Buffer"),
-                            size: agent_buf_size,
-                            usage: BufferUsages::STORAGE
-                                | BufferUsages::COPY_SRC
-                                | BufferUsages::COPY_DST,
-                            mapped_at_creation: true,
-                        });
-                        // Initialize new agents with random positions and angles
-                        {
-                            let mut agent_data = new_agent_buffer.slice(..).get_mapped_range_mut();
-                            let agent_f32: &mut [f32] = cast_slice_mut(&mut agent_data);
-                            for i in 0..settings.agent_count {
-                                let offset = i * 4;
-                                agent_f32[offset] = rand::random::<f32>() * physical_width as f32;
-                                agent_f32[offset + 1] =
-                                    rand::random::<f32>() * physical_height as f32;
-                                agent_f32[offset + 2] =
-                                    rand::random::<f32>() * 2.0 * std::f32::consts::PI;
-                                let speed_range =
-                                    settings.agent_speed_max - settings.agent_speed_min;
-                                agent_f32[offset + 3] =
-                                    settings.agent_speed_min + rand::random::<f32>() * speed_range;
-                            }
-                        }
-                        new_agent_buffer.unmap();
-
-                        // Update bind groups with new agent buffer
-                        bind_group_manager.update_compute_bind_group(
-                            &device,
-                            &pipeline_manager.compute_bind_group_layout,
-                            &new_agent_buffer,
-                            &trail_map_buffer,
-                            &sim_size_buffer,
-                        );
-
-                        // Replace old buffer with new one
-                        agent_buffer = new_agent_buffer;
-
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
+                        pending_agent_count = (pending_agent_count.saturating_sub(decrement)).max(1);
+                        last_agent_count_change = Instant::now();
                     }
                 }
 
@@ -817,6 +615,11 @@ fn main() {
                         settings = preset.settings.clone();
                         current_preset_name = preset.name.clone();
 
+                        // Update pending values to match new settings
+                        pending_agent_count = settings.agent_count;
+                        pending_min_speed = settings.agent_speed_min;
+                        pending_max_speed = settings.agent_speed_max;
+
                         // Update uniform buffer with new settings
                         let sim_size_uniform = SimSizeUniform::new(
                             physical_width,
@@ -828,6 +631,16 @@ fn main() {
                             &sim_size_buffer,
                             0,
                             bytemuck::bytes_of(&sim_size_uniform),
+                        );
+
+                        // Reassign agent speeds with new settings
+                        reassign_agent_speeds(
+                            &agent_buffer,
+                            &device,
+                            &queue,
+                            settings.agent_count,
+                            settings.agent_speed_min,
+                            settings.agent_speed_max,
                         );
                     }
                 }
@@ -910,6 +723,34 @@ fn main() {
                     let trail_map_size = (physical_width * physical_height) as usize;
                     let clear_buffer = vec![0.0f32; trail_map_size];
                     queue.write_buffer(&trail_map_buffer, 0, bytemuck::cast_slice(&clear_buffer));
+
+                    // Randomize all agent positions and headings
+                    let agent_buf_size = (settings.agent_count * 4 * std::mem::size_of::<f32>()) as u64;
+                    let temp_agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("Temp Agent Buffer (Redistribute)"),
+                        size: agent_buf_size,
+                        usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+                        mapped_at_creation: true,
+                    });
+                    {
+                        let mut agent_data = temp_agent_buffer.slice(..).get_mapped_range_mut();
+                        let agent_f32: &mut [f32] = cast_slice_mut(&mut agent_data);
+                        for i in 0..settings.agent_count {
+                            let offset = i * 4;
+                            agent_f32[offset] = rand::random::<f32>() * physical_width as f32;
+                            agent_f32[offset + 1] = rand::random::<f32>() * physical_height as f32;
+                            agent_f32[offset + 2] = rand::random::<f32>() * 2.0 * std::f32::consts::PI;
+                            let speed_range = settings.agent_speed_max - settings.agent_speed_min;
+                            agent_f32[offset + 3] = settings.agent_speed_min + rand::random::<f32>() * speed_range;
+                        }
+                    }
+                    temp_agent_buffer.unmap();
+                    // Copy randomized data into the real agent buffer
+                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Agent Buffer Redistribute Encoder"),
+                    });
+                    encoder.copy_buffer_to_buffer(&temp_agent_buffer, 0, &agent_buffer, 0, agent_buf_size);
+                    queue.submit(Some(encoder.finish()));
                 }
             }
 
@@ -1089,6 +930,109 @@ fn main() {
                     let current_time = Instant::now();
                     let elapsed = current_time - last_fps_update;
 
+                    // Check if agent count debounce period has elapsed
+                    if pending_agent_count != settings.agent_count 
+                        && current_time - last_agent_count_change >= agent_count_debounce_duration {
+                        settings.agent_count = pending_agent_count;
+                        // Resize agent buffer
+                        let agent_buf_size = (settings.agent_count * 4 * std::mem::size_of::<f32>()) as u64;
+                        let new_agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("Agent Buffer"),
+                            size: agent_buf_size,
+                            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+                            mapped_at_creation: true,
+                        });
+                        // Initialize new agents with random positions and angles
+                        {
+                            let mut agent_data = new_agent_buffer.slice(..).get_mapped_range_mut();
+                            let agent_f32: &mut [f32] = cast_slice_mut(&mut agent_data);
+                            for i in 0..settings.agent_count {
+                                let offset = i * 4;
+                                agent_f32[offset] = rand::random::<f32>() * physical_width as f32;
+                                agent_f32[offset + 1] = rand::random::<f32>() * physical_height as f32;
+                                agent_f32[offset + 2] = rand::random::<f32>() * 2.0 * std::f32::consts::PI;
+                                let speed_range = settings.agent_speed_max - settings.agent_speed_min;
+                                agent_f32[offset + 3] = settings.agent_speed_min + rand::random::<f32>() * speed_range;
+                            }
+                        }
+                        new_agent_buffer.unmap();
+
+                        // Update bind groups with new agent buffer
+                        bind_group_manager.update_compute_bind_group(
+                            &device,
+                            &pipeline_manager.compute_bind_group_layout,
+                            &new_agent_buffer,
+                            &trail_map_buffer,
+                            &sim_size_buffer,
+                        );
+
+                        // Replace old buffer with new one
+                        agent_buffer = new_agent_buffer;
+
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    }
+
+                    // Check if min speed debounce period has elapsed
+                    if pending_min_speed != settings.agent_speed_min 
+                        && current_time - last_min_speed_change >= agent_count_debounce_duration {
+                        settings.set_agent_speed_min(pending_min_speed);
+                        // Ensure max speed is not less than min speed
+                        if settings.agent_speed_max < settings.agent_speed_min {
+                            settings.agent_speed_max = settings.agent_speed_min;
+                            pending_max_speed = settings.agent_speed_min;
+                        }
+                        reassign_agent_speeds(
+                            &agent_buffer,
+                            &device,
+                            &queue,
+                            settings.agent_count,
+                            settings.agent_speed_min,
+                            settings.agent_speed_max,
+                        );
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    }
+
+                    // Check if max speed debounce period has elapsed
+                    if pending_max_speed != settings.agent_speed_max 
+                        && current_time - last_max_speed_change >= agent_count_debounce_duration {
+                        settings.agent_speed_max = pending_max_speed;
+                        // Ensure min speed is not greater than max speed
+                        if settings.agent_speed_min > settings.agent_speed_max {
+                            settings.agent_speed_min = settings.agent_speed_max;
+                            pending_min_speed = settings.agent_speed_max;
+                        }
+                        reassign_agent_speeds(
+                            &agent_buffer,
+                            &device,
+                            &queue,
+                            settings.agent_count,
+                            settings.agent_speed_min,
+                            settings.agent_speed_max,
+                        );
+                        update_settings(
+                            &mut settings,
+                            &mut current_preset_name,
+                            &sim_size_buffer,
+                            &queue,
+                            physical_width,
+                            physical_height,
+                        );
+                    }
+
                     if elapsed >= fps_update_interval {
                         let fps = frame_count as f64 / elapsed.as_secs_f64();
                         let frame_time = (current_time - last_frame_time).as_secs_f64() * 1000.0;
@@ -1121,10 +1065,28 @@ fn main() {
                                 format_float_dynamic(settings.pheromone_diffusion_rate);
                             let deposition_amount =
                                 format_float_dynamic(settings.pheromone_deposition_amount);
-                            let agent_count = settings.agent_count.to_formatted_string(&Locale::en);
+                            let agent_count = if pending_agent_count != settings.agent_count {
+                                format!("{} (pending: {})", 
+                                    settings.agent_count.to_formatted_string(&Locale::en),
+                                    pending_agent_count.to_formatted_string(&Locale::en))
+                            } else {
+                                settings.agent_count.to_formatted_string(&Locale::en)
+                            };
                             let agent_jitter = format_float_dynamic(settings.agent_jitter);
-                            let agent_speed_min = format_float_dynamic(settings.agent_speed_min);
-                            let agent_speed_max = format_float_dynamic(settings.agent_speed_max);
+                            let agent_speed_min = if pending_min_speed != settings.agent_speed_min {
+                                format!("{} (pending: {})",
+                                    format_float_dynamic(settings.agent_speed_min),
+                                    format_float_dynamic(pending_min_speed))
+                            } else {
+                                format_float_dynamic(settings.agent_speed_min)
+                            };
+                            let agent_speed_max = if pending_max_speed != settings.agent_speed_max {
+                                format!("{} (pending: {})",
+                                    format_float_dynamic(settings.agent_speed_max),
+                                    format_float_dynamic(pending_max_speed))
+                            } else {
+                                format_float_dynamic(settings.agent_speed_max)
+                            };
                             let agent_turn_speed = format_float_dynamic(
                                 settings.agent_turn_speed * 180.0 / std::f32::consts::PI,
                             );
@@ -1148,7 +1110,7 @@ fn main() {
                                 (A) Angle:\t{agent_sensor_angle}°\n\
                                 (D) Distance:\t{agent_sensor_distance}\n\
                                 Press / to toggle help\n\
-                                Press C to clear trail map\n\
+                                Press C to reset the simulation\n\
                                 Press G to cycle LUTs (Shift+G for reverse)\n\
                                 Press F to toggle LUT reversal\n\
                                 Hold any key + arrows to adjust its setting\n\
