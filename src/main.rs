@@ -165,13 +165,19 @@ fn main() {
         force_fallback_adapter: false,
     }))
     .unwrap();
+
+    // Get the adapter limits
+    let adapter_limits = adapter.limits();
+    info!("Adapter max buffer size: {}", adapter_limits.max_buffer_size);
+    info!("Adapter max storage buffer binding size: {}", adapter_limits.max_storage_buffer_binding_size);
+
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: None,
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits {
-                max_buffer_size: u32::MAX as u64,
-                max_storage_buffer_binding_size: u32::MAX,
+                max_buffer_size: adapter_limits.max_buffer_size,
+                max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
                 ..wgpu::Limits::default()
             },
         },
