@@ -4,6 +4,7 @@ use wgpu::{
 
 pub struct BindGroupManager {
     pub compute_bind_group: BindGroup,
+    pub gradient_bind_group: BindGroup,
     pub display_bind_group: BindGroup,
     pub render_bind_group: BindGroup,
 }
@@ -13,10 +14,12 @@ impl BindGroupManager {
     pub fn new(
         device: &Device,
         compute_bind_group_layout: &BindGroupLayout,
+        gradient_bind_group_layout: &BindGroupLayout,
         display_bind_group_layout: &BindGroupLayout,
         render_bind_group_layout: &BindGroupLayout,
         agent_buffer: &Buffer,
         trail_map_buffer: &Buffer,
+        gradient_buffer: &Buffer,
         sim_size_buffer: &Buffer,
         display_view: &TextureView,
         display_sampler: &wgpu::Sampler,
@@ -28,12 +31,20 @@ impl BindGroupManager {
                 compute_bind_group_layout,
                 agent_buffer,
                 trail_map_buffer,
+                gradient_buffer,
+                sim_size_buffer,
+            ),
+            gradient_bind_group: Self::create_gradient_bind_group(
+                device,
+                gradient_bind_group_layout,
+                gradient_buffer,
                 sim_size_buffer,
             ),
             display_bind_group: Self::create_display_bind_group(
                 device,
                 display_bind_group_layout,
                 trail_map_buffer,
+                gradient_buffer,
                 display_view,
                 sim_size_buffer,
                 lut_buffer,
@@ -53,6 +64,7 @@ impl BindGroupManager {
         compute_bind_group_layout: &BindGroupLayout,
         agent_buffer: &Buffer,
         trail_map_buffer: &Buffer,
+        gradient_buffer: &Buffer,
         sim_size_buffer: &Buffer,
     ) {
         self.compute_bind_group = Self::create_compute_bind_group(
@@ -60,6 +72,22 @@ impl BindGroupManager {
             compute_bind_group_layout,
             agent_buffer,
             trail_map_buffer,
+            gradient_buffer,
+            sim_size_buffer,
+        );
+    }
+
+    pub fn update_gradient_bind_group(
+        &mut self,
+        device: &Device,
+        gradient_bind_group_layout: &BindGroupLayout,
+        gradient_buffer: &Buffer,
+        sim_size_buffer: &Buffer,
+    ) {
+        self.gradient_bind_group = Self::create_gradient_bind_group(
+            device,
+            gradient_bind_group_layout,
+            gradient_buffer,
             sim_size_buffer,
         );
     }
@@ -69,6 +97,7 @@ impl BindGroupManager {
         device: &Device,
         display_bind_group_layout: &BindGroupLayout,
         trail_map_buffer: &Buffer,
+        gradient_buffer: &Buffer,
         display_view: &TextureView,
         sim_size_buffer: &Buffer,
         lut_buffer: &Buffer,
@@ -77,6 +106,7 @@ impl BindGroupManager {
             device,
             display_bind_group_layout,
             trail_map_buffer,
+            gradient_buffer,
             display_view,
             sim_size_buffer,
             lut_buffer,
@@ -103,6 +133,7 @@ impl BindGroupManager {
         layout: &BindGroupLayout,
         agent_buffer: &Buffer,
         trail_map_buffer: &Buffer,
+        gradient_buffer: &Buffer,
         sim_size_buffer: &Buffer,
     ) -> BindGroup {
         device.create_bind_group(&BindGroupDescriptor {
@@ -121,6 +152,32 @@ impl BindGroupManager {
                     binding: 2,
                     resource: sim_size_buffer.as_entire_binding(),
                 },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: gradient_buffer.as_entire_binding(),
+                },
+            ],
+        })
+    }
+
+    fn create_gradient_bind_group(
+        device: &Device,
+        layout: &BindGroupLayout,
+        gradient_buffer: &Buffer,
+        sim_size_buffer: &Buffer,
+    ) -> BindGroup {
+        device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Gradient Bind Group"),
+            layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: gradient_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: sim_size_buffer.as_entire_binding(),
+                },
             ],
         })
     }
@@ -129,6 +186,7 @@ impl BindGroupManager {
         device: &Device,
         layout: &BindGroupLayout,
         trail_map_buffer: &Buffer,
+        gradient_buffer: &Buffer,
         display_view: &TextureView,
         sim_size_buffer: &Buffer,
         lut_buffer: &Buffer,
@@ -152,6 +210,10 @@ impl BindGroupManager {
                 BindGroupEntry {
                     binding: 3,
                     resource: lut_buffer.as_entire_binding(),
+                },
+                BindGroupEntry {
+                    binding: 4,
+                    resource: gradient_buffer.as_entire_binding(),
                 },
             ],
         })

@@ -3,6 +3,41 @@
 
 const TAU: f32 = 6.28318530718; // 2π
 
+struct SimSizeUniform {
+    width: u32,
+    height: u32,
+    decay_factor: f32,
+    agent_jitter: f32,
+    agent_speed_min: f32,
+    agent_speed_max: f32,
+    agent_turn_speed: f32,
+    agent_sensor_angle: f32,
+    agent_sensor_distance: f32,
+    diffusion_rate: f32,
+    pheromone_deposition_amount: f32,
+    gradient_enabled: u32,
+    gradient_type: u32,
+    gradient_strength: f32,
+    gradient_center_x: f32,
+    gradient_center_y: f32,
+    gradient_size: f32,
+    gradient_angle: f32,
+    _pad1: u32,
+    _pad2: u32,
+};
+
+@group(0) @binding(0)
+var<storage, read_write> agents: array<vec4<f32>>;
+
+@group(0) @binding(1)
+var<storage, read_write> trail_map: array<f32>;
+
+@group(0) @binding(2)
+var<uniform> sim_size: SimSizeUniform;
+
+@group(0) @binding(3)
+var<storage, read> gradient_map: array<f32>;
+
 // Helper function for bilinear interpolation
 fn sample_trail_map(pos: vec2<f32>) -> f32 {
     let width = i32(sim_size.width);
@@ -26,29 +61,40 @@ fn sample_trail_map(pos: vec2<f32>) -> f32 {
     return mix(v0, v1, dy);
 }
 
-@group(0) @binding(0)
-var<storage, read_write> agents: array<vec4<f32>>;
+// Helper function to sample gradient map
+fn sample_gradient_map(pos: vec2<f32>) -> f32 {
+    let width = i32(sim_size.width);
+    let height = i32(sim_size.height);
 
-@group(0) @binding(1)
-var<storage, read_write> trail_map: array<f32>;
+    let x0 = ((i32(floor(pos.x)) % width) + width) % width;
+    let y0 = ((i32(floor(pos.y)) % height) + height) % height;
+    let x1 = (x0 + 1) % width;
+    let y1 = (y0 + 1) % height;
 
-struct SimSizeUniform {
-    width: u32,
-    height: u32,
-    decay_factor: f32,
-    agent_jitter: f32,
-    agent_speed_min: f32,
-    agent_speed_max: f32,
-    agent_turn_speed: f32,
-    agent_sensor_angle: f32,
-    agent_sensor_distance: f32,
-    diffusion_rate: f32,
-    pheromone_deposition_amount: f32,
-    agent_repulsion_strength: f32,
-    _pad1: u32,
-};
-@group(0) @binding(2)
-var<uniform> sim_size: SimSizeUniform;
+    let dx = pos.x - f32(i32(floor(pos.x)));
+    let dy = pos.y - f32(i32(floor(pos.y)));
+
+    let v00 = gradient_map[y0 * width + x0];
+    let v10 = gradient_map[y0 * width + x1];
+    let v01 = gradient_map[y1 * width + x0];
+    let v11 = gradient_map[y1 * width + x1];
+
+    let v0 = mix(v00, v10, dx);
+    let v1 = mix(v01, v11, dx);
+    return mix(v0, v1, dy);
+}
+
+// Combined function to sample both trail and gradient
+fn sample_combined_map(pos: vec2<f32>) -> f32 {
+    let trail_value = sample_trail_map(pos);
+    var gradient_value: f32;
+    if (sim_size.gradient_enabled == 1u) {
+        gradient_value = sample_gradient_map(pos);
+    } else {
+        gradient_value = 0.0;
+    }
+    return trail_value + gradient_value;
+}
 
 // Parameters for the simulation (now mostly from uniform)
 const TIME_STEP: f32 = 0.016; // Affects how far agents move per frame based on their speed
@@ -64,50 +110,47 @@ const CELL_SIZE: f32 = 20.0;  // Size of each cell in the spatial grid
 // Shared memory for storing local agent positions
 var<workgroup> local_agents: array<vec4<f32>, 256>;
 
-@compute @workgroup_size(WORKGROUP_SIZE_X, WORKGROUP_SIZE_Y)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>,
-        @builtin(local_invocation_id) local_id: vec3<u32>) {
-    let agent_index = i32(global_id.x + global_id.y * 65535u);
-    if (agent_index >= i32(arrayLength(&agents))) {
-        return;
-    }
+@compute @workgroup_size(256)
+fn update_agents(
+    @builtin(global_invocation_id) id: vec3<u32>,
+    @builtin(local_invocation_id) local_id: vec3<u32>
+) {
+    let agent_index = id.x;
+    // Remove the agent_count check since we'll handle this with dispatch workgroup size
+    // if (agent_index >= u32(sim_size.agent_count)) {
+    //     return;
+    // }
 
-    var agent = agents[agent_index];
+    // Get agent data
+    let agent = agents[agent_index];
     var x = agent.x;
     var y = agent.y;
     var angle = agent.z;
     var speed = agent.w;
 
-    // Ensure speed stays within bounds
-    speed = clamp(speed, sim_size.agent_speed_min, sim_size.agent_speed_max);
-
+    // Sample trail map at sensor positions
+    let sensor_distance = sim_size.agent_sensor_distance;
+    let sensor_angle = sim_size.agent_sensor_angle;
+    
     // Calculate sensor positions
-    let sensor_angle_left = angle - sim_size.agent_sensor_angle;
-    let sensor_angle_right = angle + sim_size.agent_sensor_angle;
-    let sensor_angle_center = angle;
-
-    let sensor_pos_left = vec2<f32>(
-        x + sim_size.agent_sensor_distance * cos(sensor_angle_left),
-        y + sim_size.agent_sensor_distance * sin(sensor_angle_left)
+    let left_angle = angle - sensor_angle;
+    let right_angle = angle + sensor_angle;
+    
+    let left_pos = vec2<f32>(
+        x + cos(left_angle) * sensor_distance,
+        y + sin(left_angle) * sensor_distance
     );
-    let sensor_pos_right = vec2<f32>(
-        x + sim_size.agent_sensor_distance * cos(sensor_angle_right),
-        y + sim_size.agent_sensor_distance * sin(sensor_angle_right)
+    let right_pos = vec2<f32>(
+        x + cos(right_angle) * sensor_distance,
+        y + sin(right_angle) * sensor_distance
     );
-    let sensor_pos_center = vec2<f32>(
-        x + sim_size.agent_sensor_distance * cos(sensor_angle_center),
-        y + sim_size.agent_sensor_distance * sin(sensor_angle_center)
-    );
-
-    // Sample the trail map at sensor positions using bilinear interpolation
-    let left_value = sample_trail_map(sensor_pos_left);
-    let right_value = sample_trail_map(sensor_pos_right);
-    let center_value = sample_trail_map(sensor_pos_center);
-
-    // Update agent angle based on sensor values
-    if (center_value > left_value && center_value > right_value) {
-        // Continue straight
-    } else if (left_value > right_value) {
+    
+    // Sample combined trail + gradient maps at sensor positions
+    let left_value = sample_combined_map(left_pos);
+    let right_value = sample_combined_map(right_pos);
+    
+    // Update angle based on sensor readings
+    if (left_value > right_value) {
         // Calculate shortest path to turn left
         let target_angle = angle - TAU;
         let angle_diff = target_angle - angle;
@@ -129,14 +172,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>,
     // Calculate repulsion using workgroup-based approach
     var repulsion_force = vec2<f32>(0.0, 0.0);
     let repulsion_radius = 8.0;  // Increased from 5.0 to 8.0
-    let repulsion_strength = sim_size.agent_repulsion_strength * 2.0;  // Doubled the strength
+    let repulsion_strength = 2.0;  // Fixed constant value since agent_repulsion_strength was removed
 
     // Calculate cell coordinates
     let cell_x = i32(x / CELL_SIZE);
     let cell_y = i32(y / CELL_SIZE);
 
     // Store agent in shared memory
-    let local_index = i32(local_id.x + local_id.y * WORKGROUP_SIZE_X);
+    let local_index = i32(local_id.x);
     local_agents[local_index] = vec4<f32>(x, y, angle, speed);
     workgroupBarrier();
 
@@ -189,52 +232,72 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>,
 }
 
 // Add a new compute entry point for trail decay
-@compute @workgroup_size(16, 16)
+@compute @workgroup_size(256)
 fn decay_trail(@builtin(global_invocation_id) id: vec3<u32>) {
-    let x = i32(id.x);
-    let y = i32(id.y);
-    if (x >= i32(sim_size.width) || y >= i32(sim_size.height)) {
+    let idx = id.x;
+    let total_size = sim_size.width * sim_size.height;
+    if (idx >= total_size) {
         return;
     }
+
     // Toroidal wrapping for index
-    let wrapped_x = (x + i32(sim_size.width)) % i32(sim_size.width);
-    let wrapped_y = (y + i32(sim_size.height)) % i32(sim_size.height);
-    let idx = wrapped_y * i32(sim_size.width) + wrapped_x;
+    let x = idx % sim_size.width;
+    let y = idx / sim_size.width;
+    let wrapped_x = (x + sim_size.width) % sim_size.width;
+    let wrapped_y = (y + sim_size.height) % sim_size.height;
+    let wrapped_idx = wrapped_y * sim_size.width + wrapped_x;
+    
     let decay_factor = sim_size.decay_factor * 0.001;
-    trail_map[idx] = max(trail_map[idx] - decay_factor, 0.0);
+    trail_map[wrapped_idx] = max(trail_map[wrapped_idx] - decay_factor, 0.0);
 }
 
 // Add a new compute entry point for diffusion
-@compute @workgroup_size(16, 16)
+@compute @workgroup_size(256)
 fn diffuse_trail(@builtin(global_invocation_id) id: vec3<u32>) {
-    let x = i32(id.x);
-    let y = i32(id.y);
-    if (x >= i32(sim_size.width) || y >= i32(sim_size.height)) {
+    let idx = id.x;
+    let total_size = sim_size.width * sim_size.height;
+    if (idx >= total_size) {
         return;
     }
 
-    let idx = y * i32(sim_size.width) + x;
-    let diffusion_rate = clamp(sim_size.diffusion_rate, 0.0, 1.0);
+    let x = idx % sim_size.width;
+    let y = idx / sim_size.width;
     
-    // Box blur using 3x3 neighborhood with toroidal wrapping
-    var sum = 0.0;
-    var count = 0.0;
-    let width = i32(sim_size.width);
-    let height = i32(sim_size.height);
+    // Get neighboring values with toroidal wrapping
+    let x_prev = (x + sim_size.width - 1) % sim_size.width;
+    let x_next = (x + 1) % sim_size.width;
+    let y_prev = (y + sim_size.height - 1) % sim_size.height;
+    let y_next = (y + 1) % sim_size.height;
     
-    for (var dy = -1; dy <= 1; dy++) {
-        for (var dx = -1; dx <= 1; dx++) {
-            let nx = (x + dx + width) % width;
-            let ny = (y + dy + height) % height;
-            let sample_idx = ny * width + nx;
-            sum += trail_map[sample_idx];
-            count += 1.0;
-        }
-    }
+    let center = trail_map[y * sim_size.width + x];
+    let left = trail_map[y * sim_size.width + x_prev];
+    let right = trail_map[y * sim_size.width + x_next];
+    let up = trail_map[y_prev * sim_size.width + x];
+    let down = trail_map[y_next * sim_size.width + x];
     
-    // Apply diffusion if we have valid neighbors
-    if (count > 0.0) {
-        let avg_value = sum / count;
-        trail_map[idx] = mix(trail_map[idx], avg_value, diffusion_rate);
-    }
+    // Simple diffusion: average of neighbors
+    let diffusion_rate = sim_size.diffusion_rate;
+    let new_value = center * (1.0 - diffusion_rate) + 
+                   (left + right + up + down) * (diffusion_rate * 0.25);
+    
+    trail_map[y * sim_size.width + x] = new_value;
+}
+
+@compute @workgroup_size(256)
+fn update_agent_speeds(@builtin(global_invocation_id) id: vec3<u32>) {
+    let agent_index = id.x;
+    
+    // Get current agent data
+    let agent = agents[agent_index];
+    let x = agent.x;
+    let y = agent.y;
+    let angle = agent.z;
+    
+    // Generate new random speed within the current range
+    let random_speed = fract(sin(f32(agent_index) * 12.9898 + 78.233) * 43758.5453);
+    let speed_range = sim_size.agent_speed_max - sim_size.agent_speed_min;
+    let new_speed = sim_size.agent_speed_min + random_speed * speed_range;
+    
+    // Update agent with new speed
+    agents[agent_index] = vec4<f32>(x, y, angle, new_speed);
 } 

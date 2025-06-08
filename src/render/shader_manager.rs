@@ -4,6 +4,7 @@ use wgpu::{Device, ShaderModule, ShaderModuleDescriptor, ShaderSource};
 pub struct ShaderManager {
     pub compute_shader: ShaderModule,
     pub display_shader: ShaderModule,
+    pub gradient_shader: ShaderModule,
     pub quad_shader: ShaderModule,
     pub text_shader: ShaderModule,
 }
@@ -20,6 +21,11 @@ impl ShaderManager {
                 device,
                 "Display Compute Shader",
                 include_str!("../shaders/display.wgsl"),
+            ),
+            gradient_shader: Self::create_shader(
+                device,
+                "Gradient Compute Shader",
+                include_str!("../shaders/gradient.wgsl"),
             ),
             quad_shader: Self::create_shader(device, "Quad Shader", include_str!("../shaders/quad.wgsl")),
             text_shader: Self::create_shader(device, "Text Shader", include_str!("../shaders/text.wgsl")),

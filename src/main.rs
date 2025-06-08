@@ -1,38 +1,35 @@
 use bytemuck::cast_slice_mut;
-use log::info;
-use num_format::{Locale, ToFormattedString};
+use tracing::info;
 use slime_mold::lut_manager::LutManager;
-use slime_mold::presets::init_preset_manager;
 use slime_mold::settings::Settings;
 use slime_mold::simulation::SimSizeUniform;
-use slime_mold::utils::format_float_dynamic;
 use slime_mold::render::{
     bind_group_manager::BindGroupManager,
     pipeline_manager::PipelineManager,
     shader_manager::ShaderManager,
     text_renderer::TextRenderer,
 };
+use slime_mold::egui_tools::EguiRenderer;
+use winit::application::ApplicationHandler;
+use winit::event::WindowEvent;
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::window::{Window, WindowId, Fullscreen};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Instant, Duration};
+use std::collections::HashMap;
+
 use wgpu::util::DeviceExt;
 use wgpu::{Backends, Buffer, BufferUsages, Device, Instance, Queue, TextureUsages};
-use winit::{
-    event::{Event, WindowEvent},
-    event_loop::EventLoop,
-    keyboard::KeyCode,
-    window::WindowBuilder,
-};
-use winit_input_helper::WinitInputHelper;
+use slime_mold::presets::init_preset_manager;
 
+// Helper function to update settings and sync to GPU
 fn update_settings(
-    settings: &mut Settings,
-    current_preset_name: &mut String,
+    settings: &Settings,
     sim_size_buffer: &Buffer,
     queue: &Queue,
     physical_width: u32,
     physical_height: u32,
 ) {
-    *current_preset_name = "CUSTOM".to_string();
     let sim_size_uniform = SimSizeUniform::new(
         physical_width,
         physical_height,
@@ -42,123 +39,181 @@ fn update_settings(
     queue.write_buffer(sim_size_buffer, 0, bytemuck::bytes_of(&sim_size_uniform));
 }
 
-fn reassign_agent_speeds(
-    agent_buffer: &Buffer,
+// Helper function to reassign agent speeds when speed settings change using GPU compute
+fn reassign_agent_speeds_gpu(
     device: &Device,
     queue: &Queue,
+    pipeline_manager: &PipelineManager,
+    bind_group_manager: &BindGroupManager,
     agent_count: usize,
-    speed_min: f32,
-    speed_max: f32,
 ) {
-    let agent_buf_size = (agent_count * 4 * std::mem::size_of::<f32>()) as u64;
-    let temp_agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Temp Agent Buffer"),
-        size: agent_buf_size,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    // Copy from agent_buffer to temp_agent_buffer
+    // Create a simple compute shader dispatch to update speeds on GPU
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Agent Copy Encoder"),
+        label: Some("Agent Speed Update Encoder"),
     });
-    encoder.copy_buffer_to_buffer(agent_buffer, 0, &temp_agent_buffer, 0, agent_buf_size);
-    queue.submit(Some(encoder.finish()));
-
-    // Map and read
+    
     {
-        let agent_slice = temp_agent_buffer.slice(..);
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        agent_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
-        device.poll(wgpu::Maintain::Wait);
-        receiver.recv().unwrap().unwrap();
-        let agent_data = agent_slice.get_mapped_range();
-        let mut agents: Vec<f32> = bytemuck::cast_slice(&agent_data).to_vec();
-
-        // Reassign speeds
-        let speed_range = speed_max - speed_min;
-        for i in 0..agent_count {
-            let offset = i * 4;
-            agents[offset + 3] = speed_min + rand::random::<f32>() * speed_range;
-        }
-        drop(agent_data);
-
-        // Write back
-        queue.write_buffer(agent_buffer, 0, bytemuck::cast_slice(&agents));
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("Agent Speed Update Pass"),
+            timestamp_writes: None,
+        });
+        
+        // Use the dedicated speed update pipeline
+        cpass.set_pipeline(&pipeline_manager.speed_update_pipeline);
+        cpass.set_bind_group(0, &bind_group_manager.compute_bind_group, &[]);
+        cpass.dispatch_workgroups(
+            ((agent_count as u32 + 255) / 256).min(65535),
+            1,
+            1,
+        );
     }
+    
+    queue.submit(Some(encoder.finish()));
 }
 
-fn main() {
-    let mut settings = Settings::default();
-    let mut input = WinitInputHelper::new();
+// Helper function to create new agent buffer with given count
+fn create_agent_buffer(device: &Device, agent_count: usize, physical_width: u32, physical_height: u32, settings: &Settings) -> Buffer {
+    let agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Agent Buffer"),
+        size: (agent_count * 4 * std::mem::size_of::<f32>()) as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        mapped_at_creation: true,
+    });
+    // Initialize agents with random positions and angles
+    {
+        let mut agent_data = agent_buffer.slice(..).get_mapped_range_mut();
+        let agent_f32: &mut [f32] = cast_slice_mut(&mut agent_data);
+        for i in 0..agent_count {
+            let offset = i * 4;
+            agent_f32[offset] = rand::random::<f32>() * physical_width as f32;
+            agent_f32[offset + 1] = rand::random::<f32>() * physical_height as f32;
+            // Use the agent_possible_starting_headings range from settings
+            let heading_range = settings.agent_possible_starting_headings.end - settings.agent_possible_starting_headings.start;
+            let heading_radians = (settings.agent_possible_starting_headings.start + rand::random::<f32>() * heading_range) * std::f32::consts::PI / 180.0;
+            agent_f32[offset + 2] = heading_radians;
+            let speed_range = settings.agent_speed_max - settings.agent_speed_min;
+            agent_f32[offset + 3] = settings.agent_speed_min + rand::random::<f32>() * speed_range;
+        }
+    }
+    agent_buffer.unmap();
+    agent_buffer
+}
 
-    // Initialize preset manager
-    let preset_manager = init_preset_manager();
-    let mut current_preset_name = "Default".to_string();
+// Helper function to reset trail map to zero
+fn reset_trails(trail_map_buffer: &Buffer, queue: &Queue, physical_width: u32, physical_height: u32) {
+    // Use the same dimensions as the buffer creation
+    let trail_map_size = (physical_width * physical_height) as usize;
+    let clear_buffer = vec![0.0f32; trail_map_size];
+    queue.write_buffer(trail_map_buffer, 0, bytemuck::cast_slice(&clear_buffer));
+}
 
-    // Initialize LUT manager and get available LUTs
-    let lut_manager = LutManager::new();
-    let available_luts = lut_manager.get_available_luts();
-    let mut current_lut_index = available_luts
-        .iter()
-        .position(|name| name == "MATPLOTLIB_bone_r")
-        .expect("MATPLOTLIB_bone_r LUT not found");
+// Helper function to reset agents (remove all and spawn new ones)
+fn reset_agents(agent_buffer: &Buffer, _device: &Device, queue: &Queue, physical_width: u32, physical_height: u32, settings: &Settings) {
+    
+    // Generate completely new agent data directly into a vector
+    let mut agent_data = Vec::with_capacity(settings.agent_count * 4);
+    for _i in 0..settings.agent_count {
+        // New random position
+        agent_data.push(rand::random::<f32>() * physical_width as f32);
+        agent_data.push(rand::random::<f32>() * physical_height as f32);
+        
+        // New random heading
+        let heading_range = settings.agent_possible_starting_headings.end - settings.agent_possible_starting_headings.start;
+        let heading_radians = (settings.agent_possible_starting_headings.start + rand::random::<f32>() * heading_range) * std::f32::consts::PI / 180.0;
+        agent_data.push(heading_radians);
+        
+        // New random speed
+        let speed_range = settings.agent_speed_max - settings.agent_speed_min;
+        agent_data.push(settings.agent_speed_min + rand::random::<f32>() * speed_range);
+    }
+    
+    // Use write_buffer to completely replace all agent data
+    // This is non-blocking and more efficient
+    queue.write_buffer(agent_buffer, 0, bytemuck::cast_slice(&agent_data));
+}
 
-    // Load initial LUT
-    let lut_data = lut_manager
-        .load_lut(&available_luts[current_lut_index])
-        .expect("Failed to load initial LUT");
+struct App {
+    // Window and graphics state
+    window: Option<Arc<Window>>,
+    instance: Option<Instance>,
+    surface: Option<wgpu::Surface<'static>>,
+    adapter: Option<wgpu::Adapter>,
+    device: Option<Arc<Device>>,
+    queue: Option<Arc<Queue>>,
+    config: Option<wgpu::SurfaceConfiguration>,
+    
+    // Simulation settings and state
+    settings: Settings,
+    previous_settings: Settings,
+    settings_changed: bool,
+    needs_display_update: bool,
+    ui_visible: bool,
+    paused: bool,
+    
+    // FPS tracking
+    frame_times: Vec<Duration>,
+    last_frame_time: Instant,
+    
+    // Rendering components
+    egui_renderer: Option<EguiRenderer>,
+    bind_group_manager: Option<BindGroupManager>,
+    pipeline_manager: Option<PipelineManager>,
+    text_renderer: Option<TextRenderer>,
+    
+    // Buffers and textures
+    agent_buffer: Option<Buffer>,
+    trail_map_buffer: Option<Buffer>,
+    gradient_buffer: Option<Buffer>,
+    sim_size_buffer: Option<Arc<Buffer>>,
+    lut_buffer: Option<Arc<Buffer>>,
+    display_texture: Option<wgpu::Texture>,
+    display_view: Option<wgpu::TextureView>,
+    display_sampler: Option<wgpu::Sampler>,
+    
+    // LUT management
+    current_lut_index: usize,
+    previous_lut_index: usize,
+    lut_reversed: bool,
+    lut_preview_cache: HashMap<(String, bool), Vec<egui::Color32>>,
+    available_luts: Vec<String>,
+    lut_manager: LutManager,
+    
+    // Presets
+    preset_manager: slime_mold::presets::PresetManager,
+    preset_names: Vec<String>,
+    selected_preset: String,
+    new_preset_name: String,
+    save_preset_dialog_open: bool,
+}
 
-    // Initialize the event loop and window
-    let event_loop = EventLoop::new().unwrap();
-    let window = WindowBuilder::new()
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_none() {
+            // Create window
+    let mut attributes = Window::default_attributes()
         .with_title("Physarum Simulation")
         .with_inner_size(winit::dpi::LogicalSize::new(
-            settings.window_width,
-            settings.window_height,
-        ))
-        .with_fullscreen(if settings.window_fullscreen {
-            Some(winit::window::Fullscreen::Borderless(None))
-        } else {
-            None
-        })
-        .build(&event_loop)
-        .unwrap();
-
-    // Track if LUT is currently reversed
-    let mut lut_reversed = false;
-
-    // FPS counter variables
-    let mut frame_count = 0;
-    let mut last_fps_update = Instant::now();
-    let mut last_frame_time = Instant::now();
-    let fps_update_interval = Duration::from_secs(1);
-    // Help text update interval (30fps)
-    let help_update_interval = Duration::from_millis(33); // ~30fps
-    let mut last_help_update = Instant::now();
-    // LUT name display duration
-    let lut_display_duration = Duration::from_secs(3);
-    let mut last_lut_update = Instant::now();
-    // Agent count debounce timer
-    let agent_count_debounce_duration = Duration::from_millis(500);
-    let mut last_agent_count_change = Instant::now();
-    let mut pending_agent_count = settings.agent_count;
-
-    // Agent speed debounce timers
-    let mut last_min_speed_change = Instant::now();
-    let mut last_max_speed_change = Instant::now();
-    let mut pending_min_speed = settings.agent_speed_min;
-    let mut pending_max_speed = settings.agent_speed_max;
-
-    // After creating the window, wrap it in Arc for cheap cloning
-    let window = Arc::new(window);
-
-    // Initialize wgpu
-    let instance = Instance::new(wgpu::InstanceDescriptor {
-        backends: Backends::all(),
-        ..Default::default()
-    });
-    let surface = instance.create_surface(&window).unwrap();
+                    self.settings.window_width,
+                    self.settings.window_height,
+        ));
+            if self.settings.window_fullscreen {
+        attributes = attributes.with_fullscreen(Some(Fullscreen::Borderless(None)));
+    }
+            
+                let window = Arc::new(event_loop.create_window(attributes).unwrap());
+            
+            // Initialize wgpu
+            let instance = Instance::new(&wgpu::InstanceDescriptor {
+                backends: Backends::all(),
+                ..Default::default()
+            });
+            
+            // Create surface using Arc<Window> - this eliminates lifetime issues
+            let surface = instance.create_surface(window.clone()).unwrap();
+            
+            // Store the window after creating surface
+            self.window = Some(window);
+            
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: Some(&surface),
@@ -166,13 +221,13 @@ fn main() {
     }))
     .unwrap();
 
-    // Get the adapter limits
     let adapter_limits = adapter.limits();
     info!("Adapter max buffer size: {}", adapter_limits.max_buffer_size);
     info!("Adapter max storage buffer binding size: {}", adapter_limits.max_storage_buffer_binding_size);
 
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
+            memory_hints: wgpu::MemoryHints::default(),
             label: None,
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits {
@@ -185,7 +240,6 @@ fn main() {
     ))
     .unwrap();
 
-    // Wrap resources in Arc
     let device = Arc::new(device);
     let queue = Arc::new(queue);
 
@@ -198,57 +252,49 @@ fn main() {
     info!("Max agents based on device limits: {}", max_agents);
 
     // Use settings for window and simulation parameters
-    let logical_width = settings.window_width;
-    let logical_height = settings.window_height;
-    let agent_count = settings.agent_count;
-    let decay_factor = settings.pheromone_decay_factor;
+            let logical_width = self.settings.window_width;
+            let logical_height = self.settings.window_height;
 
     // Get physical size for HiDPI/Retina displays
-    let scale_factor = window.scale_factor();
-    let mut physical_width = (logical_width as f64 * scale_factor) as u32;
-    let mut physical_height = (logical_height as f64 * scale_factor) as u32;
+            let scale_factor = self.window.as_ref().unwrap().scale_factor();
+    let physical_width = (logical_width as f64 * scale_factor) as u32;
+    let physical_height = (logical_height as f64 * scale_factor) as u32;
 
     // Configure the surface
     let surface_caps = surface.get_capabilities(&adapter);
-    let surface_format = surface_caps.formats.iter().copied().next().unwrap();
-    let mut config = wgpu::SurfaceConfiguration {
+    let surface_format = surface_caps.formats.iter()
+        .copied()
+        .find(|f| f.is_srgb())
+        .unwrap_or(surface_caps.formats[0]);
+            let config = wgpu::SurfaceConfiguration {
         usage: TextureUsages::RENDER_ATTACHMENT,
         format: surface_format,
         width: physical_width,
         height: physical_height,
         present_mode: surface_caps.present_modes[0],
-        alpha_mode: surface_caps.alpha_modes[0],
+        alpha_mode: wgpu::CompositeAlphaMode::PostMultiplied,
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
     };
     surface.configure(&device, &config);
 
     // Create the simulation state (agent buffer and trail map)
-    let mut agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Agent Buffer"),
-        size: (agent_count * 4 * std::mem::size_of::<f32>()) as u64,
-        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-        mapped_at_creation: true,
-    });
-    // Initialize agents with random positions and angles (as f32)
-    {
-        let mut agent_data = agent_buffer.slice(..).get_mapped_range_mut();
-        let agent_f32: &mut [f32] = cast_slice_mut(&mut agent_data);
-        for i in 0..agent_count {
-            let offset = i * 4;
-            agent_f32[offset] = rand::random::<f32>() * physical_width as f32;
-            agent_f32[offset + 1] = rand::random::<f32>() * physical_height as f32;
-            agent_f32[offset + 2] = rand::random::<f32>() * 2.0 * std::f32::consts::PI;
-            let speed_range = settings.agent_speed_max - settings.agent_speed_min;
-            agent_f32[offset + 3] = settings.agent_speed_min + rand::random::<f32>() * speed_range;
-        }
-    }
-    agent_buffer.unmap();
+            let agent_buffer = create_agent_buffer(&device, self.settings.agent_count, physical_width, physical_height, &self.settings);
 
     // Create the trail map as a storage buffer instead of a storage texture
     let trail_map_size = (physical_width * physical_height) as usize;
-    let mut trail_map_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            let trail_map_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Trail Map Buffer"),
+        size: (trail_map_size * std::mem::size_of::<f32>()) as u64,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    // Create the gradient buffer for constant pheromone gradients
+    let gradient_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Gradient Buffer"),
         size: (trail_map_size * std::mem::size_of::<f32>()) as u64,
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
@@ -279,7 +325,7 @@ fn main() {
 
     // Create a uniform buffer for simulation/display size
     let sim_size_uniform =
-        SimSizeUniform::new(physical_width, physical_height, decay_factor, &settings);
+                SimSizeUniform::new(physical_width, physical_height, self.settings.pheromone_decay_factor, &self.settings);
     let sim_size_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Sim Size Uniform Buffer"),
         contents: bytemuck::bytes_of(&sim_size_uniform),
@@ -289,6 +335,11 @@ fn main() {
     // Initialize shader and pipeline managers
     let shader_manager = ShaderManager::new(&device);
     let pipeline_manager = PipelineManager::new(&device, &shader_manager);
+
+            // Load LUT
+            let lut_data = self.lut_manager
+                .load_lut(&self.available_luts[self.current_lut_index])
+                .expect("Failed to load initial LUT");
 
     // Create LUT buffer
     let mut lut_data_combined = Vec::with_capacity(768);
@@ -318,13 +369,15 @@ fn main() {
     });
 
     // Initialize bind group manager
-    let mut bind_group_manager = BindGroupManager::new(
+            let bind_group_manager = BindGroupManager::new(
         &device,
         &pipeline_manager.compute_bind_group_layout,
+        &pipeline_manager.gradient_bind_group_layout,
         &pipeline_manager.display_bind_group_layout,
         &pipeline_manager.render_bind_group_layout,
         &agent_buffer,
         &trail_map_buffer,
+        &gradient_buffer,
         &sim_size_buffer,
         &display_view,
         &display_sampler,
@@ -336,545 +389,99 @@ fn main() {
     let lut_buffer = Arc::new(lut_buffer);
 
     // Create text renderer
-    let mut text_renderer = TextRenderer::new(
+            let text_renderer = TextRenderer::new(
         device.clone(),
         queue.clone(),
-        settings.window_height,
+                self.settings.window_height,
         sim_size_buffer.clone(),
         lut_buffer.clone(),
     );
 
-    // Load font
-    let font_data = include_bytes!("../ZeldaSans-Regular.otf");
-    let font =
-        fontdue::Font::from_bytes(font_data as &[u8], fontdue::FontSettings::default()).unwrap();
+            // Create egui renderer
+            let egui_renderer = EguiRenderer::new(
+        device.as_ref(),
+        surface_format,
+        None,
+        1,
+                self.window.as_ref().unwrap(),
+    );
 
-    // Main event loop
-    let window_for_event = window.clone();
-    event_loop
-        .run(move |event, target| {
-            let window = &window_for_event;
-            target.set_control_flow(winit::event_loop::ControlFlow::Poll);
+    // Set dark theme for egui
+    egui_renderer.context().set_visuals(egui::Visuals::dark());
 
-            // Update input helper
-            if input.update(&event) {
-                // Handle keyboard input
-                if input.key_pressed(KeyCode::Escape) {
-                    target.exit();
-                }
+            // Store all the initialized state (window already stored above)
+            self.instance = Some(instance);
+            self.surface = Some(surface);
+            self.adapter = Some(adapter);
+            self.device = Some(device);
+            self.queue = Some(queue);
+            self.config = Some(config);
+            self.agent_buffer = Some(agent_buffer);
+            self.trail_map_buffer = Some(trail_map_buffer);
+            self.gradient_buffer = Some(gradient_buffer);
+            self.sim_size_buffer = Some(sim_size_buffer);
+            self.lut_buffer = Some(lut_buffer);
+            self.display_texture = Some(display_texture);
+            self.display_view = Some(display_view);
+            self.display_sampler = Some(display_sampler);
+            self.bind_group_manager = Some(bind_group_manager);
+            self.pipeline_manager = Some(pipeline_manager);
+            self.text_renderer = Some(text_renderer);
+            self.egui_renderer = Some(egui_renderer);
+        }
+    }
 
-                // Handle modifier keys
-                let shift_pressed =
-                    input.key_held(KeyCode::ShiftLeft) || input.key_held(KeyCode::ShiftRight);
-
-                // Handle key combinations for settings adjustment
-                if input.key_held(KeyCode::KeyT) {
-                    if input.key_pressed(KeyCode::ArrowUp) {
-                        let increment = if shift_pressed { 0.01 } else { 0.1 };
-                        settings.agent_turn_speed =
-                            (settings.agent_turn_speed + increment).min(6.283_185_5);
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
-                    } else if input.key_pressed(KeyCode::ArrowDown) {
-                        let decrement = if shift_pressed { 0.01 } else { 0.1 };
-                        settings.agent_turn_speed =
-                            (settings.agent_turn_speed - decrement).max(0.0);
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
-                    }
-                }
-
-                if input.key_held(KeyCode::KeyJ) {
-                    if input.key_pressed(KeyCode::ArrowUp) {
-                        let increment = if shift_pressed { 0.01 } else { 0.1 };
-                        settings.agent_jitter += increment;
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
-                    } else if input.key_pressed(KeyCode::ArrowDown) {
-                        let decrement = if shift_pressed { 0.01 } else { 0.1 };
-                        settings.agent_jitter = (settings.agent_jitter - decrement).max(0.0);
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
-                    }
-                }
-
-                if input.key_held(KeyCode::KeyS) {
-                    if input.key_pressed(KeyCode::ArrowUp) {
-                        let increment = if shift_pressed { 1.0 } else { 5.0 };
-                        pending_min_speed = (pending_min_speed + increment).min(settings.agent_speed_max);
-                        last_min_speed_change = Instant::now();
-                    } else if input.key_pressed(KeyCode::ArrowDown) {
-                        let decrement = if shift_pressed { 1.0 } else { 5.0 };
-                        pending_min_speed = (pending_min_speed - decrement).max(0.0);
-                        last_min_speed_change = Instant::now();
-                    }
-                }
-
-                if input.key_held(KeyCode::KeyX) {
-                    if input.key_pressed(KeyCode::ArrowUp) {
-                        let increment = if shift_pressed { 1.0 } else { 5.0 };
-                        pending_max_speed += increment;
-                        last_max_speed_change = Instant::now();
-                    } else if input.key_pressed(KeyCode::ArrowDown) {
-                        let decrement = if shift_pressed { 1.0 } else { 5.0 };
-                        pending_max_speed = (pending_max_speed - decrement).max(pending_min_speed);
-                        last_max_speed_change = Instant::now();
-                    }
-                }
-
-                if input.key_held(KeyCode::KeyA) {
-                    if input.key_pressed(KeyCode::ArrowUp) {
-                        let increment = if shift_pressed { 0.01 } else { 0.1 };
-                        settings.agent_sensor_angle += increment;
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
-                    } else if input.key_pressed(KeyCode::ArrowDown) {
-                        let decrement = if shift_pressed { 0.01 } else { 0.1 };
-                        settings.agent_sensor_angle =
-                            (settings.agent_sensor_angle - decrement).max(0.0);
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
-                    }
-                }
-
-                if input.key_held(KeyCode::KeyD) {
-                    if input.key_pressed(KeyCode::ArrowUp) {
-                        let increment = if shift_pressed { 1.0 } else { 5.0 };
-                        settings.agent_sensor_distance += increment;
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
-                    } else if input.key_pressed(KeyCode::ArrowDown) {
-                        let decrement = if shift_pressed { 1.0 } else { 5.0 };
-                        settings.agent_sensor_distance =
-                            (settings.agent_sensor_distance - decrement).max(0.0);
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
-                    }
-                }
-
-                if input.key_held(KeyCode::KeyR) {
-                    if input.key_pressed(KeyCode::ArrowUp) {
-                        let increment = if shift_pressed { 0.1 } else { 1.0 };
-                        settings.pheromone_deposition_amount += increment;
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
-                    } else if input.key_pressed(KeyCode::ArrowDown) {
-                        let decrement = if shift_pressed { 0.1 } else { 1.0 };
-                        settings.pheromone_deposition_amount =
-                            (settings.pheromone_deposition_amount - decrement).max(0.0);
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
-                    }
-                }
-
-                if input.key_held(KeyCode::KeyV) {
-                    if input.key_pressed(KeyCode::ArrowUp) {
-                        let increment = if shift_pressed { 0.1 } else { 1.0 };
-                        settings.pheromone_decay_factor += increment;
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
-                    } else if input.key_pressed(KeyCode::ArrowDown) {
-                        let decrement = if shift_pressed { 0.1 } else { 1.0 };
-                        settings.pheromone_decay_factor =
-                            (settings.pheromone_decay_factor - decrement).max(0.0);
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
-                    }
-                }
-
-                if input.key_held(KeyCode::KeyB) {
-                    if input.key_pressed(KeyCode::ArrowUp) {
-                        let increment = if shift_pressed { 0.01 } else { 0.1 };
-                        settings.pheromone_diffusion_rate =
-                            (settings.pheromone_diffusion_rate + increment).min(1.0);
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
-                    } else if input.key_pressed(KeyCode::ArrowDown) {
-                        let decrement = if shift_pressed { 0.01 } else { 0.1 };
-                        settings.pheromone_diffusion_rate =
-                            (settings.pheromone_diffusion_rate - decrement).max(0.0);
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
-                    }
-                }
-
-                if input.key_held(KeyCode::KeyN) {
-                    if input.key_pressed(KeyCode::ArrowUp) {
-                        let increment = if shift_pressed { 100_000 } else { 1_000_000 };
-                        pending_agent_count = (pending_agent_count + increment).min(max_agents);
-                        last_agent_count_change = Instant::now();
-                    } else if input.key_pressed(KeyCode::ArrowDown) {
-                        let decrement = if shift_pressed { 100_000 } else { 1_000_000 };
-                        pending_agent_count = (pending_agent_count.saturating_sub(decrement)).max(1);
-                        last_agent_count_change = Instant::now();
-                    }
-                }
-
-                // Handle preset cycling
-                if input.key_pressed(KeyCode::KeyP) {
-                    // Get all preset names from the preset manager
-                    let preset_names = preset_manager.get_preset_names();
-
-                    // Find current index
-                    let current_index = preset_names
-                        .iter()
-                        .position(|name| name == &current_preset_name)
-                        .unwrap_or(0);
-
-                    // Calculate new index
-                    let new_index = if shift_pressed {
-                        if current_index == 0 {
-                            preset_names.len() - 1
-                        } else {
-                            current_index - 1
-                        }
-                    } else {
-                        (current_index + 1) % preset_names.len()
-                    };
-
-                    // Apply new preset
-                    if let Some(preset) = preset_manager.get_preset(&preset_names[new_index]) {
-                        settings = preset.settings.clone();
-                        current_preset_name = preset.name.clone();
-
-                        // Update pending values to match new settings
-                        pending_agent_count = settings.agent_count;
-                        pending_min_speed = settings.agent_speed_min;
-                        pending_max_speed = settings.agent_speed_max;
-
-                        // Update uniform buffer with new settings
-                        let sim_size_uniform = SimSizeUniform::new(
-                            physical_width,
-                            physical_height,
-                            settings.pheromone_decay_factor,
-                            &settings,
-                        );
-                        queue.write_buffer(
-                            &sim_size_buffer,
-                            0,
-                            bytemuck::bytes_of(&sim_size_uniform),
-                        );
-
-                        // Reassign agent speeds with new settings
-                        reassign_agent_speeds(
-                            &agent_buffer,
-                            &device,
-                            &queue,
-                            settings.agent_count,
-                            settings.agent_speed_min,
-                            settings.agent_speed_max,
-                        );
-                    }
-                }
-
-                // Handle LUT cycling
-                if input.key_pressed(KeyCode::KeyG) {
-                    if shift_pressed {
-                        if current_lut_index == 0 {
-                            current_lut_index = available_luts.len() - 1;
-                        } else {
-                            current_lut_index -= 1;
-                        }
-                    } else {
-                        current_lut_index = (current_lut_index + 1) % available_luts.len();
-                    }
-
-                    let mut lut_data = lut_manager
-                        .load_lut(&available_luts[current_lut_index])
-                        .expect("Failed to load LUT");
-
-                    if lut_reversed {
-                        lut_data.reverse();
-                    }
-
-                    let mut lut_data_combined = Vec::with_capacity(768);
-                    lut_data_combined.extend_from_slice(&lut_data.red);
-                    lut_data_combined.extend_from_slice(&lut_data.green);
-                    lut_data_combined.extend_from_slice(&lut_data.blue);
-                    let lut_data_u32: Vec<u32> =
-                        lut_data_combined.iter().map(|&x| x as u32).collect();
-                    queue.write_buffer(&lut_buffer, 0, bytemuck::cast_slice(&lut_data_u32));
-
-                    window.set_title(&format!(
-                        "Physarum Simulation - LUT: {}{}",
-                        available_luts[current_lut_index],
-                        if lut_reversed { " (Reversed)" } else { "" }
-                    ));
-                    last_lut_update = Instant::now();
-                }
-
-                // Handle LUT reversal (changed from R to F)
-                if input.key_pressed(KeyCode::KeyF) {
-                    let mut lut_data = lut_manager
-                        .load_lut(&available_luts[current_lut_index])
-                        .expect("Failed to load LUT");
-
-                    if lut_reversed {
-                        lut_data = lut_manager
-                            .load_lut(&available_luts[current_lut_index])
-                            .expect("Failed to load LUT");
-                    } else {
-                        lut_data.reverse();
-                    }
-
-                    lut_reversed = !lut_reversed;
-
-                    let mut lut_data_combined = Vec::with_capacity(768);
-                    lut_data_combined.extend_from_slice(&lut_data.red);
-                    lut_data_combined.extend_from_slice(&lut_data.green);
-                    lut_data_combined.extend_from_slice(&lut_data.blue);
-                    let lut_data_u32: Vec<u32> =
-                        lut_data_combined.iter().map(|&x| x as u32).collect();
-                    queue.write_buffer(&lut_buffer, 0, bytemuck::cast_slice(&lut_data_u32));
-
-                    window.set_title(&format!(
-                        "Physarum Simulation - LUT: {}{}",
-                        available_luts[current_lut_index],
-                        if lut_reversed { " (Reversed)" } else { "" }
-                    ));
-                    last_lut_update = Instant::now();
-                }
-
-                // Handle help text toggle
-                if input.key_pressed(KeyCode::Slash) {
-                    text_renderer.toggle_visibility();
-                }
-
-                // Handle trail map clear
-                if input.key_pressed(KeyCode::KeyC) {
-                    let trail_map_size = (physical_width * physical_height) as usize;
-                    let clear_buffer = vec![0.0f32; trail_map_size];
-                    queue.write_buffer(&trail_map_buffer, 0, bytemuck::cast_slice(&clear_buffer));
-
-                    // Randomize all agent positions and headings
-                    let agent_buf_size = (settings.agent_count * 4 * std::mem::size_of::<f32>()) as u64;
-                    let temp_agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("Temp Agent Buffer (Redistribute)"),
-                        size: agent_buf_size,
-                        usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
-                        mapped_at_creation: true,
-                    });
-                    {
-                        let mut agent_data = temp_agent_buffer.slice(..).get_mapped_range_mut();
-                        let agent_f32: &mut [f32] = cast_slice_mut(&mut agent_data);
-                        for i in 0..settings.agent_count {
-                            let offset = i * 4;
-                            agent_f32[offset] = rand::random::<f32>() * physical_width as f32;
-                            agent_f32[offset + 1] = rand::random::<f32>() * physical_height as f32;
-                            agent_f32[offset + 2] = rand::random::<f32>() * 2.0 * std::f32::consts::PI;
-                            let speed_range = settings.agent_speed_max - settings.agent_speed_min;
-                            agent_f32[offset + 3] = settings.agent_speed_min + rand::random::<f32>() * speed_range;
+        fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
+        if let Some(window) = &self.window {
+            // Handle egui input
+            if let Some(egui_renderer) = &mut self.egui_renderer {
+                let _consumed = egui_renderer.handle_input(window, &event);
+            }
+            
+            // Handle key press for UI toggle
+            if let WindowEvent::KeyboardInput { event: key_event, .. } = &event {
+                if key_event.state.is_pressed() {
+                    if let winit::keyboard::Key::Character(c) = &key_event.logical_key {
+                        if c == "/" {
+                            self.ui_visible = !self.ui_visible;
                         }
                     }
-                    temp_agent_buffer.unmap();
-                    // Copy randomized data into the real agent buffer
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("Agent Buffer Redistribute Encoder"),
-                    });
-                    encoder.copy_buffer_to_buffer(&temp_agent_buffer, 0, &agent_buffer, 0, agent_buf_size);
-                    queue.submit(Some(encoder.finish()));
                 }
             }
+        }
 
-            match event {
-                Event::WindowEvent {
-                    event: WindowEvent::CloseRequested,
-                    ..
-                } => target.exit(),
-                Event::WindowEvent {
-                    event: WindowEvent::Resized(new_size),
-                    ..
-                } => {
-                    // Store old sizes
-                    let old_width = config.width;
-                    let old_height = config.height;
-
-                    // Get the current scale factor
-                    let scale_factor = window.scale_factor();
-
-                    // Calculate logical size from physical size
-                    let logical_width = (new_size.width as f64 / scale_factor) as u32;
-                    let logical_height = (new_size.height as f64 / scale_factor) as u32;
-
-                    // Calculate physical size for HiDPI/Retina displays
-                    physical_width = (logical_width as f64 * scale_factor) as u32;
-                    physical_height = (logical_height as f64 * scale_factor) as u32;
-
-                    info!(
-                        "[resize] logical size: {}x{}, physical size: {}x{}, scale factor: {}",
-                        logical_width,
-                        logical_height,
-                        physical_width,
-                        physical_height,
-                        scale_factor
-                    );
-
+        match event {
+            WindowEvent::Resized(physical_size) => {
+                if let (Some(surface), Some(device), Some(config)) = (&self.surface, &self.device, &mut self.config) {
                     // Update surface configuration
-                    config.width = physical_width;
-                    config.height = physical_height;
-                    surface.configure(&device, &config);
-
-                    // --- SCALE AGENT POSITIONS ---
-                    {
-                        let agent_buf_size = (agent_count * 4 * std::mem::size_of::<f32>()) as u64;
-                        let temp_agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("Temp Agent Buffer"),
-                            size: agent_buf_size,
-                            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                            mapped_at_creation: false,
-                        });
-                        // Copy from agent_buffer to temp_agent_buffer
-                        let mut encoder =
-                            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("Agent Copy Encoder"),
-                            });
-                        encoder.copy_buffer_to_buffer(
-                            &agent_buffer,
-                            0,
-                            &temp_agent_buffer,
-                            0,
-                            agent_buf_size,
-                        );
-                        queue.submit(Some(encoder.finish()));
-                        // Map and read
-                        {
-                            let agent_slice = temp_agent_buffer.slice(..);
-                            let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-                            agent_slice
-                                .map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
-                            device.poll(wgpu::Maintain::Wait);
-                            receiver.recv().unwrap().unwrap();
-                            let agent_data = agent_slice.get_mapped_range();
-                            let mut agents: Vec<f32> = bytemuck::cast_slice(&agent_data).to_vec();
-                            // Scale positions
-                            for i in 0..agent_count {
-                                let offset = i * 4;
-                                agents[offset] *= physical_width as f32 / old_width as f32;
-                                agents[offset + 1] *= physical_height as f32 / old_height as f32;
-                            }
-                            drop(agent_data);
-                            // Write back
-                            queue.write_buffer(&agent_buffer, 0, bytemuck::cast_slice(&agents));
-                        }
-                        // temp_agent_buffer drops here
-                    }
-
-                    // --- ALWAYS RESIZE PHEROMONE/TRAIL MAP TO MATCH WINDOW ---
-                    {
-                        let new_size = (physical_width * physical_height) as usize;
-                        let trail_buf_size = (new_size * std::mem::size_of::<f32>()) as u64;
-                        // Create new trail map buffer with the correct size
-                        let new_trail_map_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("Trail Map Buffer"),
-                            size: trail_buf_size,
-                            usage: wgpu::BufferUsages::STORAGE
-                                | wgpu::BufferUsages::COPY_SRC
-                                | wgpu::BufferUsages::COPY_DST,
-                            mapped_at_creation: false,
-                        });
-                        // Optionally, resample old data if desired (omitted for clarity)
-                        // Replace old buffer with new one
-                        trail_map_buffer = new_trail_map_buffer;
-                    }
-
-                    // Recreate the display texture
-                    let texture_width = physical_width.min(max_texture_dimension);
-                    let texture_height = physical_height.min(max_texture_dimension);
-                    info!(
-                        "[resize] texture_width: {}, texture_height: {}, max_texture_dimension: {}",
-                        texture_width, texture_height, max_texture_dimension
-                    );
-                    info!(
-                        "[resize] display_texture size: width: {}, height: {}",
-                        texture_width, texture_height
-                    );
-
-                    // Create new display texture with updated size
-                    let display_texture = device.create_texture(&wgpu::TextureDescriptor {
+                    config.width = physical_size.width;
+                    config.height = physical_size.height;
+                    surface.configure(device, config);
+                    
+                    // Update simulation size and settings
+                    self.settings.window_width = physical_size.width;
+                    self.settings.window_height = physical_size.height;
+                    update_settings(&self.settings, self.sim_size_buffer.as_ref().unwrap(), self.queue.as_ref().unwrap(), physical_size.width, physical_size.height);
+                    
+                    // Recreate trail map buffer with new dimensions
+                    let trail_map_size = (physical_size.width * physical_size.height) as usize;
+                    self.trail_map_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("Trail Map Buffer"),
+                        size: (trail_map_size * std::mem::size_of::<f32>()) as u64,
+                        usage: wgpu::BufferUsages::STORAGE
+                            | wgpu::BufferUsages::COPY_SRC
+                            | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }));
+                    
+                    // Recreate agent buffer with new dimensions
+                    self.agent_buffer = Some(create_agent_buffer(device, self.settings.agent_count, physical_size.width, physical_size.height, &self.settings));
+                    
+                    // Recreate display texture with new dimensions
+                    let max_texture_dimension = device.limits().max_texture_dimension_2d;
+                    let texture_width = physical_size.width.min(max_texture_dimension);
+                    let texture_height = physical_size.height.min(max_texture_dimension);
+                    self.display_texture = Some(device.create_texture(&wgpu::TextureDescriptor {
                         label: Some("Display Texture"),
                         size: wgpu::Extent3d {
                             width: texture_width,
@@ -889,359 +496,1033 @@ fn main() {
                             | wgpu::TextureUsages::TEXTURE_BINDING
                             | wgpu::TextureUsages::COPY_SRC,
                         view_formats: &[],
-                    });
-                    let display_view =
-                        display_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-                    // Update uniform buffer with new size
-                    let sim_size_uniform = SimSizeUniform::new(
-                        physical_width,
-                        physical_height,
-                        decay_factor,
-                        &settings,
-                    );
-                    queue.write_buffer(&sim_size_buffer, 0, bytemuck::bytes_of(&sim_size_uniform));
-
-                    // Update bind groups with new resources
-                    bind_group_manager.update_compute_bind_group(
-                        &device,
-                        &pipeline_manager.compute_bind_group_layout,
-                        &agent_buffer,
-                        &trail_map_buffer,
-                        &sim_size_buffer,
-                    );
-
-                    bind_group_manager.update_display_bind_group(
-                        &device,
-                        &pipeline_manager.display_bind_group_layout,
-                        &trail_map_buffer,
-                        &display_view,
-                        &sim_size_buffer,
-                        &lut_buffer,
-                    );
-
-                    bind_group_manager.update_render_bind_group(
-                        &device,
-                        &pipeline_manager.render_bind_group_layout,
-                        &display_view,
-                        &display_sampler,
-                    );
-
-                    // Update text renderer window size
-                    text_renderer.update_window_size(physical_height);
-                }
-                Event::AboutToWait => {
-                    // Calculate FPS
-                    frame_count += 1;
-                    let current_time = Instant::now();
-                    let elapsed = current_time - last_fps_update;
-
-                    // Check if agent count debounce period has elapsed
-                    if pending_agent_count != settings.agent_count 
-                        && current_time - last_agent_count_change >= agent_count_debounce_duration {
-                        settings.agent_count = pending_agent_count;
-                        // Resize agent buffer
-                        let agent_buf_size = (settings.agent_count * 4 * std::mem::size_of::<f32>()) as u64;
-                        let new_agent_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("Agent Buffer"),
-                            size: agent_buf_size,
-                            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
-                            mapped_at_creation: true,
-                        });
-                        // Initialize new agents with random positions and angles
-                        {
-                            let mut agent_data = new_agent_buffer.slice(..).get_mapped_range_mut();
-                            let agent_f32: &mut [f32] = cast_slice_mut(&mut agent_data);
-                            for i in 0..settings.agent_count {
-                                let offset = i * 4;
-                                agent_f32[offset] = rand::random::<f32>() * physical_width as f32;
-                                agent_f32[offset + 1] = rand::random::<f32>() * physical_height as f32;
-                                agent_f32[offset + 2] = rand::random::<f32>() * 2.0 * std::f32::consts::PI;
-                                let speed_range = settings.agent_speed_max - settings.agent_speed_min;
-                                agent_f32[offset + 3] = settings.agent_speed_min + rand::random::<f32>() * speed_range;
-                            }
-                        }
-                        new_agent_buffer.unmap();
-
-                        // Update bind groups with new agent buffer
-                        bind_group_manager.update_compute_bind_group(
-                            &device,
+                    }));
+                    self.display_view = self.display_texture.as_ref().map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()));
+                    
+                    // Recreate gradient buffer with new dimensions
+                    self.gradient_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("Gradient Buffer"),
+                        size: (trail_map_size * std::mem::size_of::<f32>()) as u64,
+                        usage: wgpu::BufferUsages::STORAGE
+                            | wgpu::BufferUsages::COPY_SRC
+                            | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }));
+                    
+                    // Update bind group with new buffers and texture view
+                    if let (Some(agent_buffer), Some(trail_map_buffer), Some(gradient_buffer), Some(sim_size_buffer), Some(display_view), Some(display_sampler), Some(lut_buffer), Some(pipeline_manager)) = 
+                        (&self.agent_buffer, &self.trail_map_buffer, &self.gradient_buffer, &self.sim_size_buffer, &self.display_view, &self.display_sampler, &self.lut_buffer, &self.pipeline_manager) {
+                        self.bind_group_manager = Some(BindGroupManager::new(
+                            device,
                             &pipeline_manager.compute_bind_group_layout,
-                            &new_agent_buffer,
-                            &trail_map_buffer,
-                            &sim_size_buffer,
-                        );
-
-                        // Replace old buffer with new one
-                        agent_buffer = new_agent_buffer;
-
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
+                            &pipeline_manager.gradient_bind_group_layout,
+                            &pipeline_manager.display_bind_group_layout,
+                            &pipeline_manager.render_bind_group_layout,
+                            agent_buffer,
+                            trail_map_buffer,
+                            gradient_buffer,
+                            sim_size_buffer,
+                            display_view,
+                            display_sampler,
+                            lut_buffer,
+                        ));
                     }
-
-                    // Check if min speed debounce period has elapsed
-                    if pending_min_speed != settings.agent_speed_min 
-                        && current_time - last_min_speed_change >= agent_count_debounce_duration {
-                        settings.set_agent_speed_min(pending_min_speed);
-                        // Ensure max speed is not less than min speed
-                        if settings.agent_speed_max < settings.agent_speed_min {
-                            settings.agent_speed_max = settings.agent_speed_min;
-                            pending_max_speed = settings.agent_speed_min;
-                        }
-                        reassign_agent_speeds(
-                            &agent_buffer,
-                            &device,
-                            &queue,
-                            settings.agent_count,
-                            settings.agent_speed_min,
-                            settings.agent_speed_max,
-                        );
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
+                    
+                    // Update text renderer
+                    if let Some(text_renderer) = &mut self.text_renderer {
+                        text_renderer.update_window_size(physical_size.height);
                     }
-
-                    // Check if max speed debounce period has elapsed
-                    if pending_max_speed != settings.agent_speed_max 
-                        && current_time - last_max_speed_change >= agent_count_debounce_duration {
-                        settings.agent_speed_max = pending_max_speed;
-                        // Ensure min speed is not greater than max speed
-                        if settings.agent_speed_min > settings.agent_speed_max {
-                            settings.agent_speed_min = settings.agent_speed_max;
-                            pending_min_speed = settings.agent_speed_max;
-                        }
-                        reassign_agent_speeds(
-                            &agent_buffer,
-                            &device,
-                            &queue,
-                            settings.agent_count,
-                            settings.agent_speed_min,
-                            settings.agent_speed_max,
-                        );
-                        update_settings(
-                            &mut settings,
-                            &mut current_preset_name,
-                            &sim_size_buffer,
-                            &queue,
-                            physical_width,
-                            physical_height,
-                        );
-                    }
-
-                    if elapsed >= fps_update_interval {
-                        let fps = frame_count as f64 / elapsed.as_secs_f64();
-                        let frame_time = (current_time - last_frame_time).as_secs_f64() * 1000.0;
-
-                        // Only update title with FPS if LUT name display duration has passed
-                        if current_time - last_lut_update >= lut_display_duration {
-                            window.set_title(&format!(
-                                "Physarum Simulation - FPS: {:.1} ({:.1}ms)",
-                                fps, frame_time
-                            ));
-                        }
-                        frame_count = 0;
-                        last_fps_update = current_time;
-                    }
-                    last_frame_time = current_time;
-
-                    // Update help text at 30fps
-                    let current_time = Instant::now();
-                    if current_time - last_help_update >= help_update_interval {
-                        // Calculate current FPS and frame time
-                        let fps =
-                            frame_count as f64 / (current_time - last_fps_update).as_secs_f64();
-                        let frame_time = (current_time - last_frame_time).as_secs_f64() * 1000.0;
-
-                        // Update help text
-                        let help_text = {
-                            let decay_factor =
-                                format_float_dynamic(settings.pheromone_decay_factor);
-                            let diffusion_rate =
-                                format_float_dynamic(settings.pheromone_diffusion_rate);
-                            let deposition_amount =
-                                format_float_dynamic(settings.pheromone_deposition_amount);
-                            let agent_count = if pending_agent_count != settings.agent_count {
-                                format!("{} (pending: {})", 
-                                    settings.agent_count.to_formatted_string(&Locale::en),
-                                    pending_agent_count.to_formatted_string(&Locale::en))
-                            } else {
-                                settings.agent_count.to_formatted_string(&Locale::en)
-                            };
-                            let agent_jitter = format_float_dynamic(settings.agent_jitter);
-                            let agent_speed_min = if pending_min_speed != settings.agent_speed_min {
-                                format!("{} (pending: {})",
-                                    format_float_dynamic(settings.agent_speed_min),
-                                    format_float_dynamic(pending_min_speed))
-                            } else {
-                                format_float_dynamic(settings.agent_speed_min)
-                            };
-                            let agent_speed_max = if pending_max_speed != settings.agent_speed_max {
-                                format!("{} (pending: {})",
-                                    format_float_dynamic(settings.agent_speed_max),
-                                    format_float_dynamic(pending_max_speed))
-                            } else {
-                                format_float_dynamic(settings.agent_speed_max)
-                            };
-                            let agent_turn_speed = format_float_dynamic(
-                                settings.agent_turn_speed * 180.0 / std::f32::consts::PI,
-                            );
-                            let agent_sensor_angle = format_float_dynamic(
-                                settings.agent_sensor_angle * 180.0 / std::f32::consts::PI,
-                            );
-                            let agent_sensor_distance =
-                                format_float_dynamic(settings.agent_sensor_distance);
-
-                            format!(
-                                "FPS:\t{fps:.1} ({frame_time:.1}ms)\n\
-                                (P) Preset:\t{current_preset_name}\n\
-                                (N) Agents:\t{agent_count}\n\
-                                (V) Decay:\t{decay_factor}\n\
-                                (B) Diffusion:\t{diffusion_rate}\n\
-                                (R) Deposition:\t{deposition_amount}\n\
-                                (J) Jitter:\t{agent_jitter}\n\
-                                (S) Min Speed:\t{agent_speed_min}\n\
-                                (X) Max Speed:\t{agent_speed_max}\n\
-                                (T) Turn:\t{agent_turn_speed}°\n\
-                                (A) Angle:\t{agent_sensor_angle}°\n\
-                                (D) Distance:\t{agent_sensor_distance}\n\
-                                Press / to toggle help\n\
-                                Press C to reset the simulation\n\
-                                Press G to cycle LUTs (Shift+G for reverse)\n\
-                                Press F to toggle LUT reversal\n\
-                                Hold any key + arrows to adjust its setting\n\
-                                Adjust with Shift held for fine control",
-                            )
-                        };
-
-                        text_renderer.render_text(&help_text, &font, window.inner_size());
-                        last_help_update = current_time;
-                    }
-
-                    // Run the compute pass to update agents and trail map
-                    let mut encoder = device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                    {
-                        let mut compute_pass =
-                            encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                                label: None,
-                                timestamp_writes: None,
-                            });
-                        compute_pass.set_pipeline(&pipeline_manager.compute_pipeline);
-                        compute_pass.set_bind_group(0, &bind_group_manager.compute_bind_group, &[]);
-                        // Split the workgroups across multiple dimensions
-                        let workgroup_size = 64u32;
-                        let total_workgroups = (agent_count as u32).div_ceil(workgroup_size);
-                        let workgroups_x = total_workgroups.min(65535);
-                        let workgroups_y = total_workgroups.div_ceil(workgroups_x);
-                        compute_pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
-                    }
-                    queue.submit(Some(encoder.finish()));
-
-                    // Run the decay pass
-                    let mut encoder = device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                    {
-                        let mut decay_pass =
-                            encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                                label: Some("Decay Pass"),
-                                timestamp_writes: None,
-                            });
-                        decay_pass.set_pipeline(&pipeline_manager.decay_pipeline);
-                        decay_pass.set_bind_group(0, &bind_group_manager.compute_bind_group, &[]);
-                        let workgroup_size = 16u32;
-                        let dispatch_x = physical_width.div_ceil(workgroup_size);
-                        let dispatch_y = physical_height.div_ceil(workgroup_size);
-                        decay_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
-                    }
-                    queue.submit(Some(encoder.finish()));
-
-                    // Run the display compute pass
-                    let mut encoder = device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                    {
-                        let mut compute_pass =
-                            encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                                label: None,
-                                timestamp_writes: None,
-                            });
-                        compute_pass.set_pipeline(&pipeline_manager.display_pipeline);
-                        compute_pass.set_bind_group(0, &bind_group_manager.display_bind_group, &[]);
-                        let workgroup_size = 16u32;
-                        let dispatch_x = physical_width.div_ceil(workgroup_size);
-                        let dispatch_y = physical_height.div_ceil(workgroup_size);
-                        compute_pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
-                    }
-                    queue.submit(Some(encoder.finish()));
-
-                    // Run diffusion
-                    let mut encoder = device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                    let mut diffuse_pass =
-                        encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                            label: Some("Diffuse Pass"),
-                            timestamp_writes: None,
-                        });
-                    diffuse_pass.set_pipeline(&pipeline_manager.diffuse_pipeline);
-                    diffuse_pass.set_bind_group(0, &bind_group_manager.compute_bind_group, &[]);
-                    diffuse_pass.dispatch_workgroups(
-                        (physical_width + 15) / 16,
-                        (physical_height + 15) / 16,
-                        1,
-                    );
-                    drop(diffuse_pass);
-                    queue.submit(Some(encoder.finish()));
-
-                    // Render the trail map to the screen
-                    let frame = surface.get_current_texture().unwrap();
-                    let view = frame
-                        .texture
-                        .create_view(&wgpu::TextureViewDescriptor::default());
-                    let mut encoder = device
-                        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                    {
-                        let mut render_pass =
-                            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                label: None,
-                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                    view: &view,
-                                    resolve_target: None,
-                                    ops: wgpu::Operations {
-                                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                                        store: wgpu::StoreOp::Store,
-                                    },
-                                })],
-                                depth_stencil_attachment: None,
-                                timestamp_writes: None,
-                                occlusion_query_set: None,
-                            });
-                        render_pass.set_pipeline(&pipeline_manager.render_pipeline);
-                        render_pass.set_bind_group(0, &bind_group_manager.render_bind_group, &[]);
-                        render_pass.draw(0..6, 0..1);
-
-                        // Draw text overlay
-                        if let Some(text_bind_group) = text_renderer.get_bind_group() {
-                            render_pass.set_pipeline(&pipeline_manager.text_pipeline);
-                            render_pass.set_bind_group(0, text_bind_group, &[]);
-                            render_pass.draw(0..6, 0..1);
-                        }
-                    }
-                    queue.submit(Some(encoder.finish()));
-
-                    frame.present();
                 }
-                _ => {}
             }
-        })
-        .expect("Error in event loop");
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+            }
+            WindowEvent::RedrawRequested => {
+                self.render();
+            }
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+}
+
+impl App {
+    fn new() -> Self {
+        let settings = Settings::default();
+        let preset_manager = init_preset_manager();
+        let preset_names = preset_manager.get_preset_names();
+        let selected_preset = "Default".to_string();
+
+        // Initialize LUT manager and get available LUTs
+        let lut_manager = LutManager::new();
+        let available_luts = lut_manager.get_available_luts();
+        let current_lut_index = available_luts
+            .iter()
+            .position(|name| name == "MATPLOTLIB_bone_r")
+            .expect("MATPLOTLIB_bone_r LUT not found");
+
+        Self {
+            window: None,
+            instance: None,
+            surface: None,
+            adapter: None,
+            device: None,
+            queue: None,
+            config: None,
+            settings: settings.clone(),
+            previous_settings: settings,
+            settings_changed: false,
+            needs_display_update: false,
+            ui_visible: true,
+            paused: false,
+            frame_times: Vec::with_capacity(60),
+            last_frame_time: Instant::now(),
+            egui_renderer: None,
+            bind_group_manager: None,
+            pipeline_manager: None,
+            text_renderer: None,
+            agent_buffer: None,
+            trail_map_buffer: None,
+            gradient_buffer: None,
+            sim_size_buffer: None,
+            lut_buffer: None,
+            display_texture: None,
+            display_view: None,
+            display_sampler: None,
+            current_lut_index,
+            previous_lut_index: current_lut_index,
+            lut_reversed: false,
+            lut_preview_cache: HashMap::new(),
+            available_luts,
+            lut_manager,
+            preset_manager,
+            preset_names,
+            selected_preset,
+            new_preset_name: String::new(),
+            save_preset_dialog_open: false,
+        }
+    }
+
+        fn render(&mut self) {
+        // Update FPS tracking
+        let now = Instant::now();
+        let frame_time = now.duration_since(self.last_frame_time);
+        self.last_frame_time = now;
+
+        self.frame_times.push(frame_time);
+        if self.frame_times.len() > 60 {
+            self.frame_times.remove(0);
+        }
+
+        // Calculate average FPS over the last 60 frames
+        let avg_frame_time: Duration = self.frame_times.iter().sum::<Duration>() / self.frame_times.len() as u32;
+
+        // Update window title with FPS
+        if let Some(window) = &self.window {
+            window.set_title(&format!("Physarum Simulation - {:.1} FPS", 1.0 / avg_frame_time.as_secs_f64()));
+        }
+
+        // Handle agent count changes immediately to prevent buffer overruns
+        if self.settings.agent_count != self.previous_settings.agent_count {
+            if let (Some(device), Some(config)) = (&self.device, &self.config) {
+                self.agent_buffer = Some(create_agent_buffer(device, self.settings.agent_count, config.width, config.height, &self.settings));
+                if let (Some(agent_buffer), Some(trail_map_buffer), Some(gradient_buffer), Some(sim_size_buffer), Some(display_view), Some(display_sampler), Some(lut_buffer), Some(pipeline_manager)) = 
+                    (&self.agent_buffer, &self.trail_map_buffer, &self.gradient_buffer, &self.sim_size_buffer, &self.display_view, &self.display_sampler, &self.lut_buffer, &self.pipeline_manager) {
+                    self.bind_group_manager = Some(BindGroupManager::new(
+                        device,
+                        &pipeline_manager.compute_bind_group_layout,
+                        &pipeline_manager.gradient_bind_group_layout,
+                        &pipeline_manager.display_bind_group_layout,
+                        &pipeline_manager.render_bind_group_layout,
+                        agent_buffer,
+                        trail_map_buffer,
+                        gradient_buffer,
+                        sim_size_buffer,
+                        display_view,
+                        display_sampler,
+                        lut_buffer,
+                    ));
+                }
+                self.settings_changed = true;
+            }
+        }
+
+        // Check if settings have changed and handle synchronization
+        if self.settings.agent_speed_min != self.previous_settings.agent_speed_min || 
+           self.settings.agent_speed_max != self.previous_settings.agent_speed_max {
+            // Speed settings changed - reassign existing agent speeds using GPU compute
+            if let (Some(device), Some(queue), Some(pipeline_manager), Some(bind_group_manager)) = 
+                (&self.device, &self.queue, &self.pipeline_manager, &self.bind_group_manager) {
+                reassign_agent_speeds_gpu(device, queue, pipeline_manager, bind_group_manager, self.settings.agent_count);
+            }
+            self.settings_changed = true;
+        }
+        
+        if self.settings.pheromone_decay_factor != self.previous_settings.pheromone_decay_factor ||
+           self.settings.pheromone_deposition_amount != self.previous_settings.pheromone_deposition_amount ||
+           self.settings.pheromone_diffusion_rate != self.previous_settings.pheromone_diffusion_rate ||
+           self.settings.agent_turn_speed != self.previous_settings.agent_turn_speed ||
+           self.settings.agent_jitter != self.previous_settings.agent_jitter ||
+           self.settings.agent_sensor_angle != self.previous_settings.agent_sensor_angle ||
+           self.settings.agent_sensor_distance != self.previous_settings.agent_sensor_distance ||
+           self.settings.gradient_enabled != self.previous_settings.gradient_enabled ||
+           self.settings.gradient_type != self.previous_settings.gradient_type ||
+           self.settings.gradient_strength != self.previous_settings.gradient_strength ||
+           self.settings.gradient_center_x != self.previous_settings.gradient_center_x ||
+           self.settings.gradient_center_y != self.previous_settings.gradient_center_y ||
+           self.settings.gradient_size != self.previous_settings.gradient_size ||
+           self.settings.gradient_angle != self.previous_settings.gradient_angle ||
+           self.settings_changed {
+            // Other settings changed - update uniform buffer
+            if let (Some(sim_size_buffer), Some(queue), Some(config)) = (&self.sim_size_buffer, &self.queue, &self.config) {
+                update_settings(&self.settings, sim_size_buffer, queue, config.width, config.height);
+            }
+            
+            // If gradient settings changed, we need to regenerate the gradient
+            if self.settings.gradient_enabled != self.previous_settings.gradient_enabled ||
+               self.settings.gradient_type != self.previous_settings.gradient_type ||
+               self.settings.gradient_strength != self.previous_settings.gradient_strength ||
+               self.settings.gradient_center_x != self.previous_settings.gradient_center_x ||
+               self.settings.gradient_center_y != self.previous_settings.gradient_center_y ||
+               self.settings.gradient_size != self.previous_settings.gradient_size ||
+               self.settings.gradient_angle != self.previous_settings.gradient_angle {
+                self.needs_display_update = true;
+            }
+        }
+        
+        // Reset settings_changed flag after all settings have been processed
+        self.settings_changed = false;
+        self.previous_settings = self.settings.clone();
+
+        // Update LUT if it has changed
+        if self.current_lut_index != self.previous_lut_index {
+            if let (Some(queue), Some(lut_buffer)) = (&self.queue, &self.lut_buffer) {
+                if let Ok(mut new_lut_data) = self.lut_manager.load_lut(&self.available_luts[self.current_lut_index]) {
+                    if self.lut_reversed {
+                        new_lut_data.reverse();
+                    }
+                    let mut new_lut_data_combined = Vec::with_capacity(768);
+                    new_lut_data_combined.extend_from_slice(&new_lut_data.red);
+                    new_lut_data_combined.extend_from_slice(&new_lut_data.green);
+                    new_lut_data_combined.extend_from_slice(&new_lut_data.blue);
+                    let new_lut_data_u32: Vec<u32> = new_lut_data_combined.iter().map(|&x| x as u32).collect();
+                    queue.write_buffer(lut_buffer, 0, bytemuck::cast_slice(&new_lut_data_u32));
+                    self.previous_lut_index = self.current_lut_index;
+                }
+            }
+        }
+
+        // Full rendering with simulation and UI
+        if let (Some(surface), Some(device), Some(queue), Some(config)) = 
+            (&self.surface, &self.device, &self.queue, &self.config) {
+            
+            if let Ok(frame) = surface.get_current_texture() {
+                let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Render Encoder"),
+                });
+
+                // Run compute passes for simulation
+                if let (Some(pipeline_manager), Some(bind_group_manager)) = (&self.pipeline_manager, &self.bind_group_manager) {
+                    let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("Simulation Compute Pass"),
+                        timestamp_writes: None,
+                    });
+
+                    // Generate gradient (always update when settings change or at startup)
+                    if self.settings.gradient_enabled && (self.settings_changed || self.needs_display_update) {
+                        cpass.set_pipeline(&pipeline_manager.gradient_pipeline);
+                        cpass.set_bind_group(0, &bind_group_manager.gradient_bind_group, &[]);
+                        cpass.dispatch_workgroups(
+                            ((config.width * config.height + 255) / 256).min(65535),
+                            1,
+                            1,
+                        );
+                    }
+
+                    // Only run simulation updates when not paused
+                    if !self.paused {
+                        // Update agent positions
+                        cpass.set_pipeline(&pipeline_manager.compute_pipeline);
+                        cpass.set_bind_group(0, &bind_group_manager.compute_bind_group, &[]);
+                        cpass.dispatch_workgroups(
+                            ((self.settings.agent_count as u32 + 255) / 256).min(65535),
+                            1,
+                            1,
+                        );
+
+                        // Decay trail map
+                        cpass.set_pipeline(&pipeline_manager.decay_pipeline);
+                        cpass.set_bind_group(0, &bind_group_manager.compute_bind_group, &[]);
+                        cpass.dispatch_workgroups(
+                            ((config.width * config.height + 255) / 256).min(65535),
+                            1,
+                            1,
+                        );
+
+                        // Diffuse trail map
+                        cpass.set_pipeline(&pipeline_manager.diffuse_pipeline);
+                        cpass.set_bind_group(0, &bind_group_manager.compute_bind_group, &[]);
+                        cpass.dispatch_workgroups(
+                            ((config.width * config.height + 255) / 256).min(65535),
+                            1,
+                            1,
+                        );
+                    }
+
+                    // Always update display (even when paused) to show current state
+                    if !self.paused || self.needs_display_update {
+                        cpass.set_pipeline(&pipeline_manager.display_pipeline);
+                        cpass.set_bind_group(0, &bind_group_manager.display_bind_group, &[]);
+                        cpass.dispatch_workgroups(
+                            ((config.width + 15) / 16).min(65535),
+                            ((config.height + 15) / 16).min(65535),
+                            1,
+                        );
+                        self.needs_display_update = false;
+                    }
+                }
+
+                // Clear the framebuffer first
+                {
+                    let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Clear Pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                }
+
+                // Begin egui frame and draw UI
+                if let (Some(window), Some(egui_renderer)) = (&self.window, &mut self.egui_renderer) {
+                    egui_renderer.begin_frame(window);
+                    
+                    // Track if agent count changes during UI processing
+                    let mut agent_count_changed = false;
+                    
+                    let full_output = egui_renderer.run_ui(window, |ctx| {
+                        if self.ui_visible {
+                            egui::SidePanel::left("settings_panel")
+                                .resizable(true)
+                                .default_width(300.0)
+                                .show(ctx, |ui| {
+                                    ui.heading("Simulation Settings");
+                                    
+                                    // Add keyboard shortcut note
+                                    ui.label(egui::RichText::new("Press / (forward slash) to show/hide this panel").italics().color(egui::Color32::GRAY));
+                                    ui.separator();
+                                    
+                                    // Add FPS display at the top
+                                    ui.horizontal(|ui| {
+                                        ui.label("FPS:");
+                                        ui.label(format!("{:.1}", 1.0 / avg_frame_time.as_secs_f64()));
+                                    });
+                                    ui.separator();
+                                    
+                                    egui::ScrollArea::vertical().show(ui, |ui| {
+                                        // Presets
+                                        ui.heading("Presets");
+                                        ui.horizontal(|ui| {
+                                            if ui.button("◀").clicked() {
+                                                let current_index = self.preset_names.iter().position(|name| name == &self.selected_preset).unwrap_or(0);
+                                                let prev_index = if current_index == 0 {
+                                                    self.preset_names.len() - 1
+                                                } else {
+                                                    current_index - 1
+                                                };
+                                                self.selected_preset = self.preset_names[prev_index].clone();
+                                                if let Some(preset) = self.preset_manager.get_preset(&self.selected_preset) {
+                                                    self.settings = preset.settings.clone();
+                                                    self.settings_changed = true;
+                                                    agent_count_changed = true;
+                                                }
+                                            }
+                                            egui::ComboBox::from_id_salt("preset_selector")
+                                                .selected_text(&self.selected_preset)
+                                                .show_ui(ui, |ui| {
+                                                    for name in &self.preset_names {
+                                                        if ui.selectable_label(&self.selected_preset == name, name).clicked() {
+                                                            self.selected_preset = name.clone();
+                                                            if let Some(preset) = self.preset_manager.get_preset(name) {
+                                                                self.settings = preset.settings.clone();
+                                                                self.settings_changed = true;
+                                                                agent_count_changed = true;
+                                                            }
+                                                        }
+                                                    }
+                                                });
+                                            if ui.button("▶").clicked() {
+                                                let current_index = self.preset_names.iter().position(|name| name == &self.selected_preset).unwrap_or(0);
+                                                let next_index = (current_index + 1) % self.preset_names.len();
+                                                self.selected_preset = self.preset_names[next_index].clone();
+                                                if let Some(preset) = self.preset_manager.get_preset(&self.selected_preset) {
+                                                    self.settings = preset.settings.clone();
+                                                    self.settings_changed = true;
+                                                    agent_count_changed = true;
+                                                }
+                                            }
+                                        });
+                                        
+                                        // Save and Delete preset buttons
+                                        ui.horizontal(|ui| {
+                                            if ui.button("💾 Save Current").clicked() {
+                                                self.save_preset_dialog_open = true;
+                                                self.new_preset_name = String::new();
+                                            }
+                                            
+                                            // Only show delete button for user presets (not built-in ones)
+                                            let user_preset_names = self.preset_manager.get_user_preset_names();
+                                            if user_preset_names.contains(&self.selected_preset) {
+                                                if ui.button("🗑 Delete").clicked() {
+                                                    if let Err(e) = self.preset_manager.delete_user_preset(&self.selected_preset) {
+                                                        eprintln!("Failed to delete preset: {}", e);
+                                                    } else {
+                                                        // Update the preset list after deletion
+                                                        self.preset_names = self.preset_manager.get_preset_names();
+                                                        
+                                                        // Select default preset if current was deleted
+                                                        if !self.preset_names.contains(&self.selected_preset) {
+                                                            self.selected_preset = "Default".to_string();
+                                                            if let Some(preset) = self.preset_manager.get_preset(&self.selected_preset) {
+                                                                self.settings = preset.settings.clone();
+                                                                self.settings_changed = true;
+                                                                agent_count_changed = true;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            
+                                            // Refresh button to reload presets from files
+                                            if ui.button("🔄 Refresh").clicked() {
+                                                // Reload presets from filesystem
+                                                self.preset_manager = slime_mold::presets::init_preset_manager();
+                                                self.preset_names = self.preset_manager.get_preset_names();
+                                                
+                                                // Validate current selection still exists
+                                                if !self.preset_names.contains(&self.selected_preset) {
+                                                    self.selected_preset = "Default".to_string();
+                                                    if let Some(preset) = self.preset_manager.get_preset(&self.selected_preset) {
+                                                        self.settings = preset.settings.clone();
+                                                        self.settings_changed = true;
+                                                        agent_count_changed = true;
+                                                    }
+                                                }
+                                            }
+                                        });
+                                        
+                                        // Save preset dialog
+                                        if self.save_preset_dialog_open {
+                                            egui::Window::new("Save Preset")
+                                                .collapsible(false)
+                                                .resizable(false)
+                                                .show(ctx, |ui| {
+                                                    ui.label("Enter preset name:");
+                                                    ui.text_edit_singleline(&mut self.new_preset_name);
+                                                    ui.horizontal(|ui| {
+                                                        if ui.button("Save").clicked() {
+                                                            if !self.new_preset_name.trim().is_empty() {
+                                                                if let Err(e) = self.preset_manager.save_user_preset(&self.new_preset_name, &self.settings) {
+                                                                    eprintln!("Failed to save preset: {}", e);
+                                                                } else {
+                                                                    // Reload presets to include the new one
+                                                                    self.preset_manager = slime_mold::presets::init_preset_manager();
+                                                                    self.preset_names = self.preset_manager.get_preset_names();
+                                                                    self.selected_preset = self.new_preset_name.clone();
+                                                                }
+                                                                self.save_preset_dialog_open = false;
+                                                            }
+                                                        }
+                                                        if ui.button("Cancel").clicked() {
+                                                            self.save_preset_dialog_open = false;
+                                                        }
+                                                    });
+                                                });
+                                        }
+                                        
+                                        ui.separator();
+
+                                        // Color Scheme
+                                        ui.heading("Color Scheme");
+                                        ui.horizontal(|ui| {
+                                            if ui.button("◀").clicked() {
+                                                if self.current_lut_index > 0 {
+                                                    self.current_lut_index -= 1;
+                                                } else {
+                                                    self.current_lut_index = self.available_luts.len() - 1;
+                                                }
+                                            }
+                                            egui::ComboBox::from_id_salt("lut_selector")
+                                                .selected_text(format!("{}{}", self.available_luts[self.current_lut_index], if self.lut_reversed { " (Reversed)" } else { "" }))
+                                                .show_ui(ui, |ui| {
+                                                    for (i, lut_name) in self.available_luts.iter().enumerate() {
+                                                        ui.horizontal(|ui| {
+                                                            // Use cache for LUT preview
+                                                            let cache_key = (lut_name.clone(), self.lut_reversed);
+                                                            let preview = self.lut_preview_cache.entry(cache_key.clone()).or_insert_with(|| {
+                                                                if let Ok(mut lut_data) = self.lut_manager.load_lut(lut_name) {
+                                                                    if self.lut_reversed {
+                                                                        lut_data.reverse();
+                                                                    }
+                                                                    // Generate a Vec<egui::Color32> for the preview gradient
+                                                                    (0..256).map(|idx| {
+                                                                        egui::Color32::from_rgb(
+                                                                            lut_data.red[idx],
+                                                                            lut_data.green[idx],
+                                                                            lut_data.blue[idx],
+                                                                        )
+                                                                    }).collect::<Vec<_>>()
+                                                                } else {
+                                                                    // Fallback: gray gradient
+                                                                    (0..256).map(|idx| egui::Color32::from_gray(idx as u8)).collect::<Vec<_>>()
+                                                                }
+                                                            });
+                                                            // Draw the gradient preview using the cached Vec<egui::Color32>
+                                                            let rect = ui.allocate_rect(
+                                                                egui::Rect::from_min_size(
+                                                                    ui.min_rect().min,
+                                                                    egui::vec2(50.0, ui.spacing().interact_size.y),
+                                                                ),
+                                                                egui::Sense::hover(),
+                                                            );
+                                                            let painter = ui.painter();
+                                                            let rect = rect.rect;
+                                                            let width = rect.width();
+                                                            let steps = 50; // Number of gradient steps
+                                                            let step_width = width / steps as f32;
+                                                            for step in 0..steps {
+                                                                let x = rect.min.x + step as f32 * step_width;
+                                                                let t = step as f32 / steps as f32;
+                                                                let idx = (t * 255.0) as usize;
+                                                                let color = preview[idx];
+                                                                painter.rect_filled(
+                                                                    egui::Rect::from_min_size(
+                                                                        egui::pos2(x, rect.min.y),
+                                                                        egui::vec2(step_width, rect.height()),
+                                                                    ),
+                                                                    0.0,
+                                                                    color,
+                                                                );
+                                                            }
+                                                            ui.add_space(5.0);
+                                                            // Add the LUT name
+                                                            if ui.selectable_value(&mut self.current_lut_index, i, lut_name).clicked() {
+                                                                ui.close_menu();
+                                                            }
+                                                        });
+                                                    }
+                                                });
+                                            if ui.button("▶").clicked() {
+                                                self.current_lut_index = (self.current_lut_index + 1) % self.available_luts.len();
+                                            }
+                                        });
+                                        if ui.button("Reverse LUT").clicked() {
+                                            self.lut_reversed = !self.lut_reversed;
+                                            // Force LUT reload
+                                            self.previous_lut_index = usize::MAX;
+                                        }
+                                        ui.separator();
+
+                                        // Controls
+                                        ui.heading("Controls");
+                                        ui.horizontal(|ui| {
+                                            // Pause/Resume button
+                                            let pause_button_text = if self.paused { "▶ Resume" } else { "⏸ Pause" };
+                                            if ui.button(pause_button_text).clicked() {
+                                                self.paused = !self.paused;
+                                            }
+                                            
+                                            if ui.button("Reset Trails").clicked() {
+                                                if let (Some(trail_map_buffer), Some(queue), Some(config)) = (&self.trail_map_buffer, &self.queue, &self.config) {
+                                                    reset_trails(trail_map_buffer, queue, config.width, config.height);
+                                                    self.needs_display_update = true;
+                                                }
+                                            }
+                                            if ui.button("Reset Agents").clicked() {
+                                                if let (Some(agent_buffer), Some(device), Some(queue), Some(config)) = (&self.agent_buffer, &self.device, &self.queue, &self.config) {
+                                                    reset_agents(agent_buffer, device, queue, config.width, config.height, &self.settings);
+                                                }
+                                            }
+                                        });
+                                        if ui.button("🎲 Randomize Settings").clicked() {
+                                            // Store current agent count
+                                            let current_agent_count = self.settings.agent_count;
+                                            
+                                            // Randomize all settings
+                                            self.settings.pheromone_decay_factor = rand::random::<f32>() * 100.0;
+                                            self.settings.pheromone_deposition_amount = rand::random::<f32>();
+                                            self.settings.pheromone_diffusion_rate = rand::random::<f32>();
+                                            self.settings.agent_speed_min = rand::random::<f32>() * 250.0;
+                                            self.settings.agent_speed_max = self.settings.agent_speed_min + rand::random::<f32>() * 250.0;
+                                            self.settings.agent_turn_speed = rand::random::<f32>() * std::f32::consts::PI;
+                                            self.settings.agent_jitter = rand::random::<f32>() * 2.0;
+                                            self.settings.agent_sensor_angle = rand::random::<f32>() * std::f32::consts::PI;
+                                            self.settings.agent_sensor_distance = rand::random::<f32>() * 250.0;
+                                            
+                                            // Randomize gradient settings
+                                            self.settings.gradient_enabled = rand::random::<bool>();
+                                            let gradient_types = slime_mold::settings::GradientType::all();
+                                            self.settings.gradient_type = gradient_types[(rand::random::<u32>() as usize) % gradient_types.len()];
+                                            self.settings.gradient_strength = rand::random::<f32>() * 100.0;
+                                            self.settings.gradient_center_x = rand::random::<f32>();
+                                            self.settings.gradient_center_y = rand::random::<f32>();
+                                            self.settings.gradient_size = 0.1 + rand::random::<f32>() * 1.9;
+                                            self.settings.gradient_angle = rand::random::<f32>() * 360.0;
+                                            
+                                            // Randomize starting direction range
+                                            let start = rand::random::<f32>() * 360.0;
+                                            let end = start + rand::random::<f32>() * (360.0 - start);
+                                            self.settings.agent_possible_starting_headings = start..end;
+                                            
+                                            // Restore agent count
+                                            self.settings.agent_count = current_agent_count;
+                                            
+                                            // Mark settings as changed
+                                            self.settings_changed = true;
+                                            self.needs_display_update = true;
+                                        }
+                                        ui.separator();
+
+                                        // Pheromone Settings
+                                        ui.heading("Pheromone Settings");
+                                        
+                                        egui::Grid::new("pheromone_grid")
+                                            .num_columns(2)
+                                            .spacing([40.0, 4.0])
+                                            .striped(true)
+                                            .show(ui, |ui| {
+                                                // Decay Factor with fine controls
+                                                ui.label("Decay Factor");
+                                                ui.horizontal(|ui| {
+                                                    if ui.button("−").clicked() {
+                                                        self.settings.pheromone_decay_factor = (self.settings.pheromone_decay_factor - 0.01).max(0.0);
+                                                    }
+                                                    ui.add(egui::DragValue::new(&mut self.settings.pheromone_decay_factor).range(0.0..=100.0).speed(0.01));
+                                                    if ui.button("+").clicked() {
+                                                        self.settings.pheromone_decay_factor = (self.settings.pheromone_decay_factor + 0.01).min(100.0);
+                                                    }
+                                                });
+                                                ui.end_row();
+                                                
+                                                // Deposition Amount with fine controls
+                                                ui.label("Deposition Amount");
+                                                ui.horizontal(|ui| {
+                                                    if ui.button("−").clicked() {
+                                                        self.settings.pheromone_deposition_amount = (self.settings.pheromone_deposition_amount - 0.01).max(0.0);
+                                                    }
+                                                    ui.add(egui::DragValue::new(&mut self.settings.pheromone_deposition_amount).range(0.0..=1.0).speed(0.01));
+                                                    if ui.button("+").clicked() {
+                                                        self.settings.pheromone_deposition_amount = (self.settings.pheromone_deposition_amount + 0.01).min(1.0);
+                                                    }
+                                                });
+                                                ui.end_row();
+                                                
+                                                // Diffusion Rate with fine controls
+                                                ui.label("Diffusion Rate");
+                                                ui.horizontal(|ui| {
+                                                    if ui.button("−").clicked() {
+                                                        self.settings.pheromone_diffusion_rate = (self.settings.pheromone_diffusion_rate - 0.01).max(0.0);
+                                                    }
+                                                    ui.add(egui::DragValue::new(&mut self.settings.pheromone_diffusion_rate).range(0.0..=1.0).speed(0.01));
+                                                    if ui.button("+").clicked() {
+                                                        self.settings.pheromone_diffusion_rate = (self.settings.pheromone_diffusion_rate + 0.01).min(1.0);
+                                                    }
+                                                });
+                                                ui.end_row();
+                                            });
+                                        ui.separator();
+
+                                        // Agent Settings
+                                        ui.heading("Agent Settings");
+                                        
+                                        egui::Grid::new("agent_grid")
+                                            .num_columns(2)
+                                            .spacing([40.0, 4.0])
+                                            .striped(true)
+                                            .show(ui, |ui| {
+                                                // Agent Count with buttons and number display
+                                                ui.label("Agent Count");
+                                                ui.horizontal(|ui| {
+                                                    let mut agent_count_m = (self.settings.agent_count as f32 / 1_000_000.0).round();
+                                                    if ui.button("−").clicked() {
+                                                        agent_count_m = (agent_count_m - 1.0).max(0.0);
+                                                        self.settings.agent_count = (agent_count_m * 1_000_000.0) as usize;
+                                                        agent_count_changed = true;
+                                                    }
+                                                    if ui.add(egui::DragValue::new(&mut agent_count_m).range(0.0..=100.0).speed(0.1).suffix("M")).changed() {
+                                                        self.settings.agent_count = (agent_count_m * 1_000_000.0) as usize;
+                                                        agent_count_changed = true;
+                                                    }
+                                                    if ui.button("+").clicked() {
+                                                        agent_count_m = (agent_count_m + 1.0).min(100.0);
+                                                        self.settings.agent_count = (agent_count_m * 1_000_000.0) as usize;
+                                                        agent_count_changed = true;
+                                                    }
+                                                });
+                                                ui.end_row();
+                                                
+                                                // Min Speed with fine controls
+                                                ui.label("Min Speed");
+                                                ui.horizontal(|ui| {
+                                                    if ui.button("−").clicked() {
+                                                        self.settings.agent_speed_min = (self.settings.agent_speed_min - 0.1).max(0.0);
+                                                    }
+                                                    ui.add(egui::DragValue::new(&mut self.settings.agent_speed_min).range(0.0..=500.0).speed(0.1));
+                                                    if ui.button("+").clicked() {
+                                                        self.settings.agent_speed_min = (self.settings.agent_speed_min + 0.1).min(self.settings.agent_speed_max);
+                                                    }
+                                                });
+                                                ui.end_row();
+                                                
+                                                // Max Speed with fine controls
+                                                ui.label("Max Speed");
+                                                ui.horizontal(|ui| {
+                                                    if ui.button("−").clicked() {
+                                                        self.settings.agent_speed_max = (self.settings.agent_speed_max - 0.1).max(self.settings.agent_speed_min);
+                                                    }
+                                                    ui.add(egui::DragValue::new(&mut self.settings.agent_speed_max).range(0.0..=500.0).speed(0.1));
+                                                    if ui.button("+").clicked() {
+                                                        self.settings.agent_speed_max = (self.settings.agent_speed_max + 0.1).min(500.0);
+                                                    }
+                                                });
+                                                ui.end_row();
+                                                
+                                                // Turn Speed with fine controls (convert radians to degrees for display)
+                                                ui.label("Turn Speed (deg/s)");
+                                                ui.horizontal(|ui| {
+                                                    let mut turn_speed_degrees = self.settings.agent_turn_speed * 180.0 / std::f32::consts::PI;
+                                                    if ui.button("−").clicked() {
+                                                        turn_speed_degrees = (turn_speed_degrees - 1.0).max(0.0);
+                                                        self.settings.agent_turn_speed = turn_speed_degrees * std::f32::consts::PI / 180.0;
+                                                    }
+                                                    if ui.add(egui::DragValue::new(&mut turn_speed_degrees).range(0.0..=360.0).speed(1.0).suffix(" deg/s")).changed() {
+                                                        self.settings.agent_turn_speed = turn_speed_degrees * std::f32::consts::PI / 180.0;
+                                                    }
+                                                    if ui.button("+").clicked() {
+                                                        turn_speed_degrees = (turn_speed_degrees + 1.0).min(360.0);
+                                                        self.settings.agent_turn_speed = turn_speed_degrees * std::f32::consts::PI / 180.0;
+                                                    }
+                                                });
+                                                ui.end_row();
+                                                
+                                                // Jitter with fine controls
+                                                ui.label("Jitter");
+                                                ui.horizontal(|ui| {
+                                                    if ui.button("−").clicked() {
+                                                        self.settings.agent_jitter = (self.settings.agent_jitter - 0.001).max(0.0);
+                                                    }
+                                                    ui.add(egui::DragValue::new(&mut self.settings.agent_jitter).range(0.0..=5.0).speed(0.001));
+                                                    if ui.button("+").clicked() {
+                                                        self.settings.agent_jitter = (self.settings.agent_jitter + 0.001).min(5.0);
+                                                    }
+                                                });
+                                                ui.end_row();
+                                            });
+                                        
+                                        // Ensure min speed doesn't exceed max speed
+                                        if self.settings.agent_speed_min > self.settings.agent_speed_max {
+                                            self.settings.agent_speed_max = self.settings.agent_speed_min;
+                                        }
+                                        if self.settings.agent_speed_max < self.settings.agent_speed_min {
+                                            self.settings.agent_speed_min = self.settings.agent_speed_max;
+                                        }
+
+                                        // Starting Direction Range
+                                        ui.heading("Starting Direction Range");
+                                        let mut start_angle = self.settings.agent_possible_starting_headings.start;
+                                        let mut end_angle = self.settings.agent_possible_starting_headings.end;
+                                        
+                                        egui::Grid::new("direction_grid")
+                                            .num_columns(2)
+                                            .spacing([40.0, 4.0])
+                                            .striped(true)
+                                            .show(ui, |ui| {
+                                                // Start Angle with fine controls
+                                                ui.label("Min Angle (degrees)");
+                                                ui.horizontal(|ui| {
+                                                    if ui.button("−").clicked() {
+                                                        start_angle = (start_angle - 1.0).max(0.0);
+                                                    }
+                                                    ui.add(egui::DragValue::new(&mut start_angle).range(0.0..=360.0).speed(1.0));
+                                                    if ui.button("+").clicked() {
+                                                        start_angle = (start_angle + 1.0).min(end_angle);
+                                                    }
+                                                });
+                                                ui.end_row();
+                                                
+                                                // End Angle with fine controls
+                                                ui.label("Max Angle (degrees)");
+                                                ui.horizontal(|ui| {
+                                                    if ui.button("−").clicked() {
+                                                        end_angle = (end_angle - 1.0).max(start_angle);
+                                                    }
+                                                    ui.add(egui::DragValue::new(&mut end_angle).range(0.0..=360.0).speed(1.0));
+                                                    if ui.button("+").clicked() {
+                                                        end_angle = (end_angle + 1.0).min(360.0);
+                                                    }
+                                                });
+                                                ui.end_row();
+                                            });
+                                        
+                                        if start_angle != self.settings.agent_possible_starting_headings.start || end_angle != self.settings.agent_possible_starting_headings.end {
+                                            self.settings.agent_possible_starting_headings = start_angle.min(end_angle)..start_angle.max(end_angle);
+                                        }
+                                        ui.separator();
+
+                                        // Gradient Settings
+                                        ui.heading("Gradient Settings");
+                                        
+                                        egui::Grid::new("gradient_grid")
+                                            .num_columns(2)
+                                            .spacing([40.0, 4.0])
+                                            .striped(true)
+                                            .show(ui, |ui| {
+                                                // Gradient Enabled
+                                                ui.label("Enable Gradients");
+                                                if ui.checkbox(&mut self.settings.gradient_enabled, "").changed() {
+                                                    self.settings_changed = true;
+                                                }
+                                                ui.end_row();
+                                                
+                                                if self.settings.gradient_enabled {
+                                                    // Gradient Type
+                                                    ui.label("Gradient Type");
+                                                    egui::ComboBox::from_id_salt("gradient_type")
+                                                        .selected_text(self.settings.gradient_type.as_str())
+                                                        .show_ui(ui, |ui| {
+                                                            for &gradient_type in slime_mold::settings::GradientType::all() {
+                                                                if ui.selectable_value(&mut self.settings.gradient_type, gradient_type, gradient_type.as_str()).changed() {
+                                                                    self.settings_changed = true;
+                                                                }
+                                                            }
+                                                        });
+                                                    ui.end_row();
+                                                    
+                                                    // Gradient Strength
+                                                    ui.label("Strength");
+                                                    ui.horizontal(|ui| {
+                                                        if ui.button("−").clicked() {
+                                                            self.settings.gradient_strength = (self.settings.gradient_strength - 1.0).max(0.0);
+                                                            self.settings_changed = true;
+                                                        }
+                                                        if ui.add(egui::DragValue::new(&mut self.settings.gradient_strength).range(0.0..=100.0).speed(1.0)).changed() {
+                                                            self.settings_changed = true;
+                                                        }
+                                                        if ui.button("+").clicked() {
+                                                            self.settings.gradient_strength = (self.settings.gradient_strength + 1.0).min(100.0);
+                                                            self.settings_changed = true;
+                                                        }
+                                                    });
+                                                    ui.end_row();
+                                                    
+                                                    // Center X
+                                                    ui.label("Center X");
+                                                    ui.horizontal(|ui| {
+                                                        if ui.button("−").clicked() {
+                                                            self.settings.gradient_center_x = (self.settings.gradient_center_x - 0.05).max(0.0);
+                                                            self.settings_changed = true;
+                                                        }
+                                                        if ui.add(egui::DragValue::new(&mut self.settings.gradient_center_x).range(0.0..=1.0).speed(0.01)).changed() {
+                                                            self.settings_changed = true;
+                                                        }
+                                                        if ui.button("+").clicked() {
+                                                            self.settings.gradient_center_x = (self.settings.gradient_center_x + 0.05).min(1.0);
+                                                            self.settings_changed = true;
+                                                        }
+                                                    });
+                                                    ui.end_row();
+                                                    
+                                                    // Center Y
+                                                    ui.label("Center Y");
+                                                    ui.horizontal(|ui| {
+                                                        if ui.button("−").clicked() {
+                                                            self.settings.gradient_center_y = (self.settings.gradient_center_y - 0.05).max(0.0);
+                                                            self.settings_changed = true;
+                                                        }
+                                                        if ui.add(egui::DragValue::new(&mut self.settings.gradient_center_y).range(0.0..=1.0).speed(0.01)).changed() {
+                                                            self.settings_changed = true;
+                                                        }
+                                                        if ui.button("+").clicked() {
+                                                            self.settings.gradient_center_y = (self.settings.gradient_center_y + 0.05).min(1.0);
+                                                            self.settings_changed = true;
+                                                        }
+                                                    });
+                                                    ui.end_row();
+                                                    
+                                                    // Size (controls scale for all gradient types)
+                                                    ui.label("Size");
+                                                    ui.horizontal(|ui| {
+                                                        if ui.button("−").clicked() {
+                                                            self.settings.gradient_size = (self.settings.gradient_size - 0.05).max(0.1);
+                                                            self.settings_changed = true;
+                                                        }
+                                                        if ui.add(egui::DragValue::new(&mut self.settings.gradient_size).range(0.1..=2.0).speed(0.01)).changed() {
+                                                            self.settings_changed = true;
+                                                        }
+                                                        if ui.button("+").clicked() {
+                                                            self.settings.gradient_size = (self.settings.gradient_size + 0.05).min(2.0);
+                                                            self.settings_changed = true;
+                                                        }
+                                                    });
+                                                    ui.end_row();
+                                                    
+                                                    // Angle (rotates all gradient types)
+                                                    ui.label("Angle (degrees)");
+                                                    ui.horizontal(|ui| {
+                                                        if ui.button("−").clicked() {
+                                                            self.settings.gradient_angle = (self.settings.gradient_angle - 5.0) % 360.0;
+                                                            self.settings_changed = true;
+                                                        }
+                                                        if ui.add(egui::DragValue::new(&mut self.settings.gradient_angle).range(0.0..=360.0).speed(1.0)).changed() {
+                                                            self.settings_changed = true;
+                                                        }
+                                                        if ui.button("+").clicked() {
+                                                            self.settings.gradient_angle = (self.settings.gradient_angle + 5.0) % 360.0;
+                                                            self.settings_changed = true;
+                                                        }
+                                                    });
+                                                    ui.end_row();
+                                                }
+                                            });
+                                        ui.separator();
+
+                                        // Sensor Settings
+                                        ui.heading("Sensor Settings");
+                                        
+                                        egui::Grid::new("sensor_grid")
+                                            .num_columns(2)
+                                            .spacing([40.0, 4.0])
+                                            .striped(true)
+                                            .show(ui, |ui| {
+                                                // Sensor Angle with fine controls (convert radians to degrees for display)
+                                                ui.label("Sensor Angle (degrees)");
+                                                ui.horizontal(|ui| {
+                                                    let mut sensor_angle_degrees = self.settings.agent_sensor_angle * 180.0 / std::f32::consts::PI;
+                                                    if ui.button("−").clicked() {
+                                                        sensor_angle_degrees = (sensor_angle_degrees - 0.5).max(0.0);
+                                                        self.settings.agent_sensor_angle = sensor_angle_degrees * std::f32::consts::PI / 180.0;
+                                                    }
+                                                    if ui.add(egui::DragValue::new(&mut sensor_angle_degrees).range(0.0..=180.0).speed(0.5).suffix(" deg")).changed() {
+                                                        self.settings.agent_sensor_angle = sensor_angle_degrees * std::f32::consts::PI / 180.0;
+                                                    }
+                                                    if ui.button("+").clicked() {
+                                                        sensor_angle_degrees = (sensor_angle_degrees + 0.5).min(180.0);
+                                                        self.settings.agent_sensor_angle = sensor_angle_degrees * std::f32::consts::PI / 180.0;
+                                                    }
+                                                });
+                                                ui.end_row();
+                                                
+                                                // Sensor Distance with fine controls
+                                                ui.label("Sensor Distance");
+                                                ui.horizontal(|ui| {
+                                                    if ui.button("−").clicked() {
+                                                        self.settings.agent_sensor_distance = (self.settings.agent_sensor_distance - 1.0).max(0.0);
+                                                    }
+                                                    ui.add(egui::DragValue::new(&mut self.settings.agent_sensor_distance).range(0.0..=500.0).speed(1.0));
+                                                    if ui.button("+").clicked() {
+                                                        self.settings.agent_sensor_distance = (self.settings.agent_sensor_distance + 1.0).min(500.0);
+                                                    }
+                                                });
+                                                ui.end_row();
+                                            });
+                                    });
+                                });
+                        }
+                    });
+                    
+                    // Handle agent count changes during UI processing
+                    if agent_count_changed {
+                        if let (Some(device), Some(config)) = (&self.device, &self.config) {
+                            self.agent_buffer = Some(create_agent_buffer(device, self.settings.agent_count, config.width, config.height, &self.settings));
+                            if let (Some(agent_buffer), Some(trail_map_buffer), Some(gradient_buffer), Some(sim_size_buffer), Some(display_view), Some(display_sampler), Some(lut_buffer), Some(pipeline_manager)) = 
+                                (&self.agent_buffer, &self.trail_map_buffer, &self.gradient_buffer, &self.sim_size_buffer, &self.display_view, &self.display_sampler, &self.lut_buffer, &self.pipeline_manager) {
+                                self.bind_group_manager = Some(BindGroupManager::new(
+                                    device,
+                                    &pipeline_manager.compute_bind_group_layout,
+                                    &pipeline_manager.gradient_bind_group_layout,
+                                    &pipeline_manager.display_bind_group_layout,
+                                    &pipeline_manager.render_bind_group_layout,
+                                    agent_buffer,
+                                    trail_map_buffer,
+                                    gradient_buffer,
+                                    sim_size_buffer,
+                                    display_view,
+                                    display_sampler,
+                                    lut_buffer,
+                                ));
+                            }
+                            self.settings_changed = true;
+                        }
+                    }
+
+                    // Render simulation to screen
+                    if let (Some(pipeline_manager), Some(bind_group_manager)) = (&self.pipeline_manager, &self.bind_group_manager) {
+                        let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Simulation Render Pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
+
+                        // Render the simulation texture
+                        rpass.set_pipeline(&pipeline_manager.render_pipeline);
+                        rpass.set_bind_group(0, &bind_group_manager.render_bind_group, &[]);
+                        rpass.draw(0..6, 0..1);
+                    }
+
+                    // End egui frame and draw with proper blending
+                    use egui_wgpu::ScreenDescriptor;
+                    let screen_descriptor = ScreenDescriptor {
+                        size_in_pixels: [config.width, config.height],
+                        pixels_per_point: window.scale_factor() as f32,
+                    };
+                    
+                    egui_renderer.end_frame_and_draw(
+                        device,
+                        queue,
+                        &mut encoder,
+                        window,
+                        &view,
+                        screen_descriptor,
+                        full_output,
+                    );
+                }
+
+                // Submit the command buffer
+                queue.submit(std::iter::once(encoder.finish()));
+                frame.present();
+            }
+        }
+    }
+}
+
+fn main() {
+    tracing_subscriber::fmt::init();
+
+    let event_loop = EventLoop::new().unwrap();
+    event_loop.set_control_flow(ControlFlow::Poll);
+
+    let mut app = App::new();
+    event_loop.run_app(&mut app).unwrap();
 }

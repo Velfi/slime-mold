@@ -1,0 +1,24 @@
+name = "Test Preset"
+
+[settings]
+agent_count = 500000
+agent_jitter = 0.08
+agent_possible_starting_headings = [0.0, 180.0]
+agent_sensor_angle = 0.5
+agent_sensor_distance = 25.0
+agent_speed_max = 100.0
+agent_speed_min = 50.0
+agent_turn_speed = 0.6
+pheromone_decay_factor = 1.5
+pheromone_deposition_amount = 0.8
+pheromone_diffusion_rate = 0.9
+window_fullscreen = false
+window_height = 900
+window_width = 1600
+gradient_enabled = true
+gradient_type = "Radial"
+gradient_strength = 10.0
+gradient_center_x = 0.5
+gradient_center_y = 0.5
+gradient_size = 0.4
+gradient_angle = 45.0 

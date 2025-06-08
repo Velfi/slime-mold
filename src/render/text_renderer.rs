@@ -234,14 +234,14 @@ impl TextRenderer {
 
         // Upload texture data
         self.queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             &text_bitmap,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(texture_width * 4), // 4 bytes per pixel for RGBA
                 rows_per_image: Some(texture_height),

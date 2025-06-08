@@ -1,0 +1,24 @@
+name = "Custom Settings"
+
+[settings]
+agent_count = 2000000
+agent_jitter = 0.15
+agent_possible_starting_headings = [90.0, 270.0]
+agent_sensor_angle = 0.8
+agent_sensor_distance = 15.0
+agent_speed_max = 200.0
+agent_speed_min = 100.0
+agent_turn_speed = 1.2
+pheromone_decay_factor = 3.0
+pheromone_deposition_amount = 0.6
+pheromone_diffusion_rate = 0.7
+window_fullscreen = false
+window_height = 900
+window_width = 1600
+gradient_enabled = false
+gradient_type = "None"
+gradient_strength = 0.0
+gradient_center_x = 0.5
+gradient_center_y = 0.5
+gradient_size = 0.3
+gradient_angle = 0.0 
