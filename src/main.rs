@@ -169,16 +169,13 @@ fn randomize_settings(settings: &mut Settings, agent_count: usize) -> usize {
     settings.agent_sensor_angle = (rand::random::<f32>() * 180.0) * std::f32::consts::PI / 180.0; // Convert degrees to radians
     settings.agent_sensor_distance = rand::random::<f32>() * 500.0;
 
-    // Randomize gradient settings
-    settings.gradient_enabled = rand::random::<bool>();
-    let gradient_types = slime_mold::settings::GradientType::all();
-    settings.gradient_type =
-        gradient_types[(rand::random::<u32>() as usize) % gradient_types.len()];
-    settings.gradient_strength = rand::random::<f32>() * 100.0;
-    settings.gradient_center_x = rand::random::<f32>();
-    settings.gradient_center_y = rand::random::<f32>();
-    settings.gradient_size = 0.1 + rand::random::<f32>() * 1.9;
-    settings.gradient_angle = rand::random::<f32>() * 360.0;
+    // Don't randomize gradient settings
+    settings.gradient_type = slime_mold::settings::GradientType::Disabled;
+    settings.gradient_strength = 0.5;
+    settings.gradient_center_x = 0.5;
+    settings.gradient_center_y = 0.5;
+    settings.gradient_size = 1.0;
+    settings.gradient_angle = 0.0;
 
     // Randomize starting direction range
     let start = rand::random::<f32>() * 360.0;
@@ -543,8 +540,12 @@ impl ApplicationHandler for App {
                             self.needs_display_update = true;
 
                             // Check if settings still match current preset
-                            if self.preset_manager.get_preset(&self.selected_preset).is_some() {
-                                self.settings_have_changed = true;  // Settings changed, mark as unsaved
+                            if self
+                                .preset_manager
+                                .get_preset(&self.selected_preset)
+                                .is_some()
+                            {
+                                self.settings_have_changed = true; // Settings changed, mark as unsaved
                             }
                         }
                     }
@@ -861,8 +862,7 @@ impl App {
             );
         }
 
-        if self.settings_changed
-        {
+        if self.settings_changed {
             // Other settings changed - update uniform buffer
             if let (Some(sim_size_buffer), Some(queue), Some(config)) =
                 (&self.sim_size_buffer, &self.queue, &self.config)
@@ -923,7 +923,7 @@ impl App {
                     });
 
                     // Generate gradient (always update when settings change or at startup)
-                    if self.settings.gradient_enabled
+                    if self.settings.gradient_type != slime_mold::settings::GradientType::Disabled
                         && (self.settings_changed
                             || self.needs_gpu_update
                             || self.needs_display_update)
@@ -1011,7 +1011,7 @@ impl App {
                     let full_output = egui_renderer.run_ui(window, |ctx| {
                         if self.ui_visible {
                             egui::SidePanel::left("settings_panel")
-                                .resizable(true)
+                                .resizable(false)
                                 .default_width(300.0)
                                 .show(ctx, |ui| {
                                     ui.heading("Simulation Settings");
@@ -1031,31 +1031,31 @@ impl App {
                                     egui::ScrollArea::vertical().show(ui, |ui| {
                                         // Presets
                                         ui.heading("Presets");
-                                                                ui.horizontal(|ui| {
-                            if ui.button("◀").clicked() {
-                                let current_index = self.preset_names.iter().position(|name| name == &self.selected_preset).unwrap_or(0);
-                                let prev_index = if current_index == 0 {
-                                    self.preset_names.len() - 1
-                                } else {
-                                    current_index - 1
-                                };
-                                preset_to_apply = Some(self.preset_names[prev_index].clone());
-                            }
-                            egui::ComboBox::from_id_salt("preset_selector")
-                                .selected_text(if self.settings_changed { "(unsaved)" } else { &self.selected_preset })
-                                .show_ui(ui, |ui| {
-                                    for name in &self.preset_names {
-                                        if ui.selectable_label(&self.selected_preset == name, name).clicked() {
-                                            preset_to_apply = Some(name.clone());
-                                        }
-                                    }
-                                });
-                            if ui.button("▶").clicked() {
-                                let current_index = self.preset_names.iter().position(|name| name == &self.selected_preset).unwrap_or(0);
-                                let next_index = (current_index + 1) % self.preset_names.len();
-                                preset_to_apply = Some(self.preset_names[next_index].clone());
-                            }
-                        });
+                                            ui.horizontal(|ui| {
+                                                if ui.button("◀").clicked() {
+                                                    let current_index = self.preset_names.iter().position(|name| name == &self.selected_preset).unwrap_or(0);
+                                                    let prev_index = if current_index == 0 {
+                                                        self.preset_names.len() - 1
+                                                    } else {
+                                                        current_index - 1
+                                                    };
+                                                    preset_to_apply = Some(self.preset_names[prev_index].clone());
+                                                }
+                                                egui::ComboBox::from_id_salt("preset_selector")
+                                                    .selected_text(if self.settings_changed { "(unsaved)" } else { &self.selected_preset })
+                                                    .show_ui(ui, |ui| {
+                                                        for name in &self.preset_names {
+                                                            if ui.selectable_label(&self.selected_preset == name, name).clicked() {
+                                                                preset_to_apply = Some(name.clone());
+                                                            }
+                                                        }
+                                                    });
+                                                if ui.button("▶").clicked() {
+                                                    let current_index = self.preset_names.iter().position(|name| name == &self.selected_preset).unwrap_or(0);
+                                                    let next_index = (current_index + 1) % self.preset_names.len();
+                                                    preset_to_apply = Some(self.preset_names[next_index].clone());
+                                                }
+                                            });
                                         
                                         // Save and Delete preset buttons
                                         ui.horizontal(|ui| {
@@ -1098,18 +1098,6 @@ impl App {
                                                 }
                                             }
                                                 }
-                                            }
-                                            
-                                            // Refresh button to reload presets from files
-                                            if ui.button("🔄 Refresh").clicked() {
-                                                // Reload presets from filesystem
-                                                self.preset_manager = slime_mold::presets::init_preset_manager();
-                                                self.preset_names = self.preset_manager.get_preset_names();
-                                                
-                                                                                // Validate current selection still exists
-                                if !self.preset_names.contains(&self.selected_preset) {
-                                    preset_to_apply = Some("Default".to_string());
-                                }
                                             }
                                         });
                                         
@@ -1548,27 +1536,23 @@ impl App {
                                             .spacing([40.0, 4.0])
                                             .striped(true)
                                             .show(ui, |ui| {
-                                                // Gradient Enabled
-                                                ui.label("Enable Gradients").on_hover_text("Adds a constant pheromone gradient to influence agent movement. Can create interesting directional patterns.");
-                                                if ui.checkbox(&mut self.settings.gradient_enabled, "").changed() {
-                                                    self.settings_changed = true;
-                                                }
+                                                // Gradient Type
+                                                ui.label("Gradient Type").on_hover_text("Different gradient patterns that influence agent movement. Each creates unique emergent behaviors.");
+                                                egui::ComboBox::from_id_salt("gradient_type")
+                                                    .selected_text(self.settings.gradient_type.as_str())
+                                                    .show_ui(ui, |ui| {
+                                                        if ui.selectable_value(&mut self.settings.gradient_type, slime_mold::settings::GradientType::Disabled, "Disabled").changed() {
+                                                            self.settings_changed = true;
+                                                        }
+                                                        for &gradient_type in slime_mold::settings::GradientType::all() {
+                                                            if gradient_type != slime_mold::settings::GradientType::Disabled && ui.selectable_value(&mut self.settings.gradient_type, gradient_type, gradient_type.as_str()).changed() {
+                                                                self.settings_changed = true;
+                                                            }
+                                                        }
+                                                    });
                                                 ui.end_row();
                                                 
-                                                if self.settings.gradient_enabled {
-                                                    // Gradient Type
-                                                    ui.label("Gradient Type").on_hover_text("Different gradient patterns that influence agent movement. Each creates unique emergent behaviors.");
-                                                    egui::ComboBox::from_id_salt("gradient_type")
-                                                        .selected_text(self.settings.gradient_type.as_str())
-                                                        .show_ui(ui, |ui| {
-                                                            for &gradient_type in slime_mold::settings::GradientType::all() {
-                                                                if ui.selectable_value(&mut self.settings.gradient_type, gradient_type, gradient_type.as_str()).changed() {
-                                                                    self.settings_changed = true;
-                                                                }
-                                                            }
-                                                        });
-                                                    ui.end_row();
-
+                                                if self.settings.gradient_type != slime_mold::settings::GradientType::Disabled {
                                                     // Gradient Strength
                                                     ui.label("Strength").on_hover_text("How strongly the gradient influences agent movement. Higher values create more pronounced directional patterns.");
                                                     ui.horizontal(|ui| {
@@ -1719,18 +1703,41 @@ impl App {
                         self.needs_gpu_update = true;
                         self.settings_have_changed = false;
                         self.settings_changed = false;
-                        
+
                         // Update the uniform buffer with new settings
-                        if let (Some(sim_size_buffer), Some(queue), Some(config)) = 
-                            (&self.sim_size_buffer, &self.queue, &self.config) {
-                            update_settings(&self.settings, sim_size_buffer, queue, config.width, config.height);
+                        if let (Some(sim_size_buffer), Some(queue), Some(config)) =
+                            (&self.sim_size_buffer, &self.queue, &self.config)
+                        {
+                            update_settings(
+                                &self.settings,
+                                sim_size_buffer,
+                                queue,
+                                config.width,
+                                config.height,
+                            );
                         }
-                        
+
                         // Reset trails and agents with new settings
-                        if let (Some(trail_map_buffer), Some(agent_buffer), Some(queue), Some(config)) = 
-                            (&self.trail_map_buffer, &self.agent_buffer, &self.queue, &self.config) {
+                        if let (
+                            Some(trail_map_buffer),
+                            Some(agent_buffer),
+                            Some(queue),
+                            Some(config),
+                        ) = (
+                            &self.trail_map_buffer,
+                            &self.agent_buffer,
+                            &self.queue,
+                            &self.config,
+                        ) {
                             reset_trails(trail_map_buffer, queue, config.width, config.height);
-                            reset_agents(agent_buffer, queue, config.width, config.height, &self.settings, self.agent_count);
+                            reset_agents(
+                                agent_buffer,
+                                queue,
+                                config.width,
+                                config.height,
+                                &self.settings,
+                                self.agent_count,
+                            );
                             self.needs_display_update = true;
                         }
                     }
@@ -1748,7 +1755,7 @@ impl App {
                             config.height,
                             &self.settings,
                         ));
-                        
+
                         // Recreate bind groups inline to avoid borrowing issues
                         if let (
                             Some(agent_buffer),
@@ -1784,7 +1791,7 @@ impl App {
                                 lut_buffer,
                             ));
                         }
-                        
+
                         self.settings_changed = true;
                         self.previous_agent_count = self.agent_count;
                     }

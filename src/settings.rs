@@ -59,13 +59,9 @@ pub struct Settings {
     ///
     /// Defaults to 1600.
     pub window_width: u32,
-    /// Whether the gradient is enabled.
-    ///
-    /// Defaults to false.
-    pub gradient_enabled: bool,
     /// The type of gradient.
     ///
-    /// Defaults to GradientType::None.
+    /// Defaults to GradientType::Disabled.
     pub gradient_type: GradientType,
     /// The strength of the gradient.
     ///
@@ -109,7 +105,7 @@ where
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum GradientType {
-    None,
+    Disabled,
     Linear,
     Radial,
     Ellipse,
@@ -120,7 +116,7 @@ pub enum GradientType {
 impl GradientType {
     pub fn as_str(&self) -> &'static str {
         match self {
-            GradientType::None => "None",
+            GradientType::Disabled => "Disabled",
             GradientType::Linear => "Linear",
             GradientType::Radial => "Radial",
             GradientType::Ellipse => "Ellipse",
@@ -131,7 +127,7 @@ impl GradientType {
 
     pub fn all() -> &'static [GradientType] {
         &[
-            GradientType::None,
+            GradientType::Disabled,
             GradientType::Linear,
             GradientType::Radial,
             GradientType::Ellipse,
@@ -158,8 +154,7 @@ impl Default for Settings {
             window_height: 900,
             window_width: 1600,
             // Gradient defaults
-            gradient_enabled: false,
-            gradient_type: GradientType::None,
+            gradient_type: GradientType::Disabled,
             gradient_strength: 0.5,
             gradient_center_x: 0.5,
             gradient_center_y: 0.5,

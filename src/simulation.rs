@@ -40,9 +40,13 @@ impl SimSizeUniform {
             agent_sensor_distance: settings.agent_sensor_distance,
             diffusion_rate: settings.pheromone_diffusion_rate,
             pheromone_deposition_rate: settings.pheromone_deposition_rate,
-            gradient_enabled: if settings.gradient_enabled { 1 } else { 0 },
+            gradient_enabled: if settings.gradient_type != GradientType::Disabled {
+                1
+            } else {
+                0
+            },
             gradient_type: match settings.gradient_type {
-                GradientType::None => 0,
+                GradientType::Disabled => 0,
                 GradientType::Linear => 1,
                 GradientType::Radial => 2,
                 GradientType::Ellipse => 3,

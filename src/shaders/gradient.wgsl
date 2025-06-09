@@ -34,7 +34,7 @@ struct SimSizeUniform {
 var<uniform> sim_size: SimSizeUniform;
 
 // Gradient types
-const GRADIENT_NONE: u32 = 0u;
+const GRADIENT_DISABLED: u32 = 0u;
 const GRADIENT_LINEAR: u32 = 1u;
 const GRADIENT_RADIAL: u32 = 2u;
 const GRADIENT_ELLIPSE: u32 = 3u;
@@ -49,8 +49,8 @@ fn generate_gradient(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
 
-    // Check if gradient is enabled
-    if (sim_size.gradient_enabled == 0u) {
+    // Check if gradient is disabled
+    if (sim_size.gradient_type == GRADIENT_DISABLED) {
         gradient_map[idx] = 0.0;
         return;
     }

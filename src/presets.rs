@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::settings::Settings;
+use crate::settings::{GradientType, Settings};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Preset {
@@ -166,7 +166,6 @@ fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
-
 pub fn init_preset_manager() -> PresetManager {
     let mut preset_manager = PresetManager::new();
 
@@ -256,7 +255,12 @@ pub fn init_preset_manager() -> PresetManager {
             pheromone_decay_rate: 100.0,
             pheromone_deposition_rate: 0.435_905_75,
             pheromone_diffusion_rate: 0.474_814_41,
-            gradient_enabled: false,
+            gradient_type: GradientType::Disabled,
+            gradient_strength: 0.5,
+            gradient_center_x: 0.5,
+            gradient_center_y: 0.5,
+            gradient_size: 0.3,
+            gradient_angle: 0.0,
             ..Settings::default()
         },
     ));
@@ -269,7 +273,7 @@ pub fn init_preset_manager() -> PresetManager {
             agent_speed_max: 479.033_1,
             agent_speed_min: 294.058_1,
             agent_turn_rate: 0.887_346_15,
-            pheromone_decay_rate: 100.0,
+            pheromone_decay_rate: 15.0,
             pheromone_deposition_rate: 0.525_721_9,
             pheromone_diffusion_rate: 0.243_336_98,
             ..Settings::default()
@@ -284,7 +288,7 @@ pub fn init_preset_manager() -> PresetManager {
             agent_speed_max: 447.087_68,
             agent_speed_min: 416.390_87,
             agent_turn_rate: 2.136_445_8,
-            pheromone_decay_rate: 100.0,
+            pheromone_decay_rate: 15.0,
             pheromone_deposition_rate: 0.633_740_1,
             pheromone_diffusion_rate: 0.079_050_72,
             ..Settings::default()
@@ -299,7 +303,7 @@ pub fn init_preset_manager() -> PresetManager {
             agent_speed_max: 350.695_13,
             agent_speed_min: 300.851_14,
             agent_turn_rate: 4.500_079_6,
-            pheromone_decay_rate: 100.0,
+            pheromone_decay_rate: 15.0,
             pheromone_deposition_rate: 0.228_417_04,
             pheromone_diffusion_rate: 0.062_788_37,
             ..Settings::default()
