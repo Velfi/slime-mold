@@ -6,7 +6,6 @@ pub struct ShaderManager {
     pub display_shader: ShaderModule,
     pub gradient_shader: ShaderModule,
     pub quad_shader: ShaderModule,
-    pub text_shader: ShaderModule,
 }
 
 impl ShaderManager {
@@ -31,11 +30,6 @@ impl ShaderManager {
                 device,
                 "Quad Shader",
                 include_str!("../shaders/quad.wgsl"),
-            ),
-            text_shader: Self::create_shader(
-                device,
-                "Text Shader",
-                include_str!("../shaders/text.wgsl"),
             ),
         }
     }
