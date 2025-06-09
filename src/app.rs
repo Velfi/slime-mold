@@ -239,12 +239,7 @@ impl ApplicationHandler for App {
 
             // Configure the surface
             let surface_caps = surface.get_capabilities(&adapter);
-            let surface_format = surface_caps
-                .formats
-                .iter()
-                .copied()
-                .find(|f| !f.is_srgb())
-                .unwrap_or(surface_caps.formats[0]);
+            let surface_format = wgpu::TextureFormat::Bgra8Unorm;
             let config = wgpu::SurfaceConfiguration {
                 usage: TextureUsages::RENDER_ATTACHMENT,
                 format: surface_format,
