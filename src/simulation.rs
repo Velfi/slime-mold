@@ -6,15 +6,15 @@ use bytemuck::{Pod, Zeroable};
 pub struct SimSizeUniform {
     pub width: u32,
     pub height: u32,
-    pub decay_factor: f32,
+    pub decay_rate: f32,
     pub agent_jitter: f32,
     pub agent_speed_min: f32,
     pub agent_speed_max: f32,
-    pub agent_turn_speed: f32,
+    pub agent_turn_rate: f32,
     pub agent_sensor_angle: f32,
     pub agent_sensor_distance: f32,
     pub diffusion_rate: f32,
-    pub pheromone_deposition_amount: f32,
+    pub pheromone_deposition_rate: f32,
     pub gradient_enabled: u32,
     pub gradient_type: u32,
     pub gradient_strength: f32,
@@ -27,19 +27,19 @@ pub struct SimSizeUniform {
 }
 
 impl SimSizeUniform {
-    pub fn new(width: u32, height: u32, decay_factor: f32, settings: &Settings) -> Self {
+    pub fn new(width: u32, height: u32, decay_rate: f32, settings: &Settings) -> Self {
         Self {
             width,
             height,
-            decay_factor,
+            decay_rate,
             agent_jitter: settings.agent_jitter,
             agent_speed_min: settings.agent_speed_min,
             agent_speed_max: settings.agent_speed_max,
-            agent_turn_speed: settings.agent_turn_speed,
+            agent_turn_rate: settings.agent_turn_rate,
             agent_sensor_angle: settings.agent_sensor_angle,
             agent_sensor_distance: settings.agent_sensor_distance,
             diffusion_rate: settings.pheromone_diffusion_rate,
-            pheromone_deposition_amount: settings.pheromone_deposition_amount,
+            pheromone_deposition_rate: settings.pheromone_deposition_rate,
             gradient_enabled: if settings.gradient_enabled { 1 } else { 0 },
             gradient_type: match settings.gradient_type {
                 GradientType::None => 0,

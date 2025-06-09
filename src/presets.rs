@@ -176,11 +176,11 @@ pub fn init_preset_manager() -> PresetManager {
         "Gloop Loops".to_string(),
         Settings {
             agent_jitter: 0.1,
-            agent_turn_speed: 0.43,
+            agent_turn_rate: 0.43,
             agent_speed_max: 300.0,
             agent_sensor_angle: 0.7,
             agent_sensor_distance: 5.0,
-            pheromone_decay_factor: 3.5,
+            pheromone_decay_rate: 3.5,
             ..Settings::default()
         },
     ));
@@ -188,11 +188,11 @@ pub fn init_preset_manager() -> PresetManager {
         "Firecracker Trees".to_string(),
         Settings {
             agent_jitter: 0.1,
-            agent_turn_speed: 0.93,
+            agent_turn_rate: 0.93,
             agent_speed_min: 200.0,
             agent_speed_max: 300.0,
             agent_sensor_angle: 0.3,
-            pheromone_decay_factor: 10.0,
+            pheromone_decay_rate: 10.0,
 
             ..Settings::default()
         },
@@ -201,18 +201,18 @@ pub fn init_preset_manager() -> PresetManager {
         "Threads".to_string(),
         Settings {
             agent_jitter: 0.0,
-            agent_turn_speed: 0.02,
+            agent_turn_rate: 0.02,
             agent_sensor_angle: 0.3,
             agent_speed_min: 50.0,
             agent_speed_max: 150.0,
-            pheromone_decay_factor: 5.0,
+            pheromone_decay_rate: 5.0,
             ..Settings::default()
         },
     ));
     preset_manager.add_preset(Preset::new(
         "Snake".to_string(),
         Settings {
-            agent_turn_speed: 0.37,
+            agent_turn_rate: 0.37,
             agent_sensor_angle: 1.34,
             agent_sensor_distance: 225.0,
             ..Settings::default()
@@ -222,12 +222,12 @@ pub fn init_preset_manager() -> PresetManager {
         "Cells".to_string(),
         Settings {
             agent_jitter: 0.2,
-            agent_turn_speed: 3.27,
+            agent_turn_rate: 3.27,
             agent_speed_min: 200.0,
             agent_speed_max: 300.0,
             agent_sensor_angle: 1.95,
             agent_sensor_distance: 60.0,
-            pheromone_decay_factor: 30.0,
+            pheromone_decay_rate: 30.0,
             ..Settings::default()
         },
     ));
@@ -235,12 +235,12 @@ pub fn init_preset_manager() -> PresetManager {
         "Net".to_string(),
         Settings {
             agent_jitter: 3.0,
-            agent_turn_speed: 6.0,
+            agent_turn_rate: 6.0,
             agent_speed_min: 100.0,
             agent_speed_max: 100.0,
             agent_sensor_angle: 1.57,
             agent_sensor_distance: 225.0,
-            pheromone_decay_factor: 40.0,
+            pheromone_decay_rate: 40.0,
             ..Settings::default()
         },
     ));
@@ -252,9 +252,9 @@ pub fn init_preset_manager() -> PresetManager {
             agent_sensor_distance: 443.473_57,
             agent_speed_max: 482.086_7,
             agent_speed_min: 426.720_86,
-            agent_turn_speed: 4.969_109_5,
-            pheromone_decay_factor: 100.0,
-            pheromone_deposition_amount: 0.435_905_75,
+            agent_turn_rate: 4.969_109_5,
+            pheromone_decay_rate: 100.0,
+            pheromone_deposition_rate: 0.435_905_75,
             pheromone_diffusion_rate: 0.474_814_41,
             gradient_enabled: false,
             ..Settings::default()
@@ -268,9 +268,9 @@ pub fn init_preset_manager() -> PresetManager {
             agent_sensor_distance: 8.729_994,
             agent_speed_max: 479.033_1,
             agent_speed_min: 294.058_1,
-            agent_turn_speed: 0.887_346_15,
-            pheromone_decay_factor: 100.0,
-            pheromone_deposition_amount: 0.525_721_9,
+            agent_turn_rate: 0.887_346_15,
+            pheromone_decay_rate: 100.0,
+            pheromone_deposition_rate: 0.525_721_9,
             pheromone_diffusion_rate: 0.243_336_98,
             ..Settings::default()
         },
@@ -283,9 +283,9 @@ pub fn init_preset_manager() -> PresetManager {
             agent_sensor_distance: 144.372_2,
             agent_speed_max: 447.087_68,
             agent_speed_min: 416.390_87,
-            agent_turn_speed: 2.136_445_8,
-            pheromone_decay_factor: 100.0,
-            pheromone_deposition_amount: 0.633_740_1,
+            agent_turn_rate: 2.136_445_8,
+            pheromone_decay_rate: 100.0,
+            pheromone_deposition_rate: 0.633_740_1,
             pheromone_diffusion_rate: 0.079_050_72,
             ..Settings::default()
         },
@@ -298,9 +298,9 @@ pub fn init_preset_manager() -> PresetManager {
             agent_sensor_distance: 31.146_05,
             agent_speed_max: 350.695_13,
             agent_speed_min: 300.851_14,
-            agent_turn_speed: 4.500_079_6,
-            pheromone_decay_factor: 100.0,
-            pheromone_deposition_amount: 0.228_417_04,
+            agent_turn_rate: 4.500_079_6,
+            pheromone_decay_rate: 100.0,
+            pheromone_deposition_rate: 0.228_417_04,
             pheromone_diffusion_rate: 0.062_788_37,
             ..Settings::default()
         },

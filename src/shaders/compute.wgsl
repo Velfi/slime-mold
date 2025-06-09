@@ -6,15 +6,15 @@ const TAU: f32 = 6.28318530718; // 2π
 struct SimSizeUniform {
     width: u32,
     height: u32,
-    decay_factor: f32,
+    decay_rate: f32,
     agent_jitter: f32,
     agent_speed_min: f32,
     agent_speed_max: f32,
-    agent_turn_speed: f32,
+    agent_turn_rate: f32,
     agent_sensor_angle: f32,
     agent_sensor_distance: f32,
     diffusion_rate: f32,
-    pheromone_deposition_amount: f32,
+    pheromone_deposition_rate: f32,
     gradient_enabled: u32,
     gradient_type: u32,
     gradient_strength: f32,
@@ -154,12 +154,12 @@ fn update_agents(
         // Calculate shortest path to turn left
         let target_angle = angle - TAU;
         let angle_diff = target_angle - angle;
-        angle += min(sim_size.agent_turn_speed, abs(angle_diff)) * sign(angle_diff);
+        angle += min(sim_size.agent_turn_rate, abs(angle_diff)) * sign(angle_diff);
     } else if (right_value > left_value) {
         // Calculate shortest path to turn right
         let target_angle = angle + TAU;
         let angle_diff = target_angle - angle;
-        angle += min(sim_size.agent_turn_speed, abs(angle_diff)) * sign(angle_diff);
+        angle += min(sim_size.agent_turn_rate, abs(angle_diff)) * sign(angle_diff);
     } else {
         // If equal, do nothing
     }
@@ -224,7 +224,7 @@ fn update_agents(
     let deposit_y = i32(y);
     if (deposit_x >= 0 && deposit_x < i32(sim_size.width) && deposit_y >= 0 && deposit_y < i32(sim_size.height)) {
         let idx = deposit_y * i32(sim_size.width) + deposit_x;
-        trail_map[idx] = clamp(trail_map[idx] + sim_size.pheromone_deposition_amount, 0.0, 1.0);
+        trail_map[idx] = clamp(trail_map[idx] + sim_size.pheromone_deposition_rate, 0.0, 1.0);
     }
 
     // Update agent in the buffer
@@ -247,9 +247,9 @@ fn decay_trail(@builtin(global_invocation_id) id: vec3<u32>) {
     let wrapped_y = (y + sim_size.height) % sim_size.height;
     let wrapped_idx = wrapped_y * sim_size.width + wrapped_x;
     
-    // Apply decay factor (now 1.0 is normal value)
-    let decay_factor = sim_size.decay_factor * 0.001; // 1.0 = 0.1% decay per frame
-    trail_map[wrapped_idx] = max(0.0, trail_map[wrapped_idx] - decay_factor);
+    // Apply decay rate (now 1.0 is normal value)
+    let decay_rate = sim_size.decay_rate * 0.001; // 1.0 = 0.1% decay per frame
+    trail_map[wrapped_idx] = max(0.0, trail_map[wrapped_idx] - decay_rate);
 }
 
 // Add a new compute entry point for diffusion

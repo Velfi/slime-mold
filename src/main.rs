@@ -31,7 +31,7 @@ fn update_settings(
     let sim_size_uniform = SimSizeUniform::new(
         physical_width,
         physical_height,
-        settings.pheromone_decay_factor,
+        settings.pheromone_decay_rate,
         settings,
     );
     queue.write_buffer(sim_size_buffer, 0, bytemuck::bytes_of(&sim_size_uniform));
@@ -157,14 +157,14 @@ fn randomize_settings(settings: &mut Settings, agent_count: usize) -> usize {
     let current_agent_count = agent_count;
 
     // Randomize all settings
-    // Use high range for decay factor to allow for more variation
-    settings.pheromone_decay_factor = rand::random::<f32>() * 10.0; // 1.0 is normal value
-    settings.pheromone_deposition_amount = rand::random::<f32>() * 100.0 / 100.0; // Convert to percentage
+    // Use high range for decay rate to allow for more variation
+    settings.pheromone_decay_rate = rand::random::<f32>() * 10.0; // 1.0 is normal value
+    settings.pheromone_deposition_rate = rand::random::<f32>() * 100.0 / 100.0; // Convert to percentage
     settings.pheromone_diffusion_rate = rand::random::<f32>() * 100.0 / 100.0; // Convert to percentage
     settings.agent_speed_min = rand::random::<f32>() * 500.0;
     settings.agent_speed_max =
         settings.agent_speed_min + rand::random::<f32>() * (500.0 - settings.agent_speed_min);
-    settings.agent_turn_speed = (rand::random::<f32>() * 360.0) * std::f32::consts::PI / 180.0; // Convert degrees to radians
+    settings.agent_turn_rate = (rand::random::<f32>() * 360.0) * std::f32::consts::PI / 180.0; // Convert degrees to radians
     settings.agent_jitter = rand::random::<f32>() * 5.0;
     settings.agent_sensor_angle = (rand::random::<f32>() * 180.0) * std::f32::consts::PI / 180.0; // Convert degrees to radians
     settings.agent_sensor_distance = rand::random::<f32>() * 500.0;
@@ -205,7 +205,7 @@ struct App {
     needs_display_update: bool,
     ui_visible: bool,
     paused: bool,
-    decay_factor_hi_range: bool,
+    decay_rate_hi_range: bool,
     settings_have_changed: bool,
 
     // FPS tracking
@@ -404,7 +404,7 @@ impl ApplicationHandler for App {
             let sim_size_uniform = SimSizeUniform::new(
                 physical_width,
                 physical_height,
-                self.settings.pheromone_decay_factor,
+                self.settings.pheromone_decay_rate,
                 &self.settings,
             );
             let sim_size_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -703,48 +703,48 @@ impl App {
             .expect("MATPLOTLIB_bone_r LUT not found");
 
         Self {
-            window: None,
-            instance: None,
-            surface: None,
             adapter: None,
-            device: None,
-            queue: None,
-            config: None,
-            agent_count: 1_000_000,
-            previous_agent_count: 1_000_000,
-            settings: settings.clone(),
-            settings_changed: false,
-            needs_gpu_update: false,
-            needs_display_update: false,
-            ui_visible: true,
-            paused: false,
-            decay_factor_hi_range: false,
-            settings_have_changed: false,
-            frame_times: Vec::with_capacity(60),
-            last_frame_time: Instant::now(),
-            egui_renderer: None,
-            bind_group_manager: None,
-            pipeline_manager: None,
-            text_renderer: None,
             agent_buffer: None,
-            trail_map_buffer: None,
-            gradient_buffer: None,
-            sim_size_buffer: None,
-            lut_buffer: None,
+            agent_count: 1_000_000,
+            available_luts,
+            bind_group_manager: None,
+            config: None,
+            current_lut_index,
+            decay_rate_hi_range: false,
+            device: None,
+            display_sampler: None,
             display_texture: None,
             display_view: None,
-            display_sampler: None,
-            current_lut_index,
-            previous_lut_index: current_lut_index,
-            lut_reversed: false,
-            lut_preview_cache: HashMap::new(),
-            available_luts,
+            egui_renderer: None,
+            frame_times: Vec::with_capacity(60),
+            gradient_buffer: None,
+            instance: None,
+            last_frame_time: Instant::now(),
+            lut_buffer: None,
             lut_manager,
+            lut_preview_cache: HashMap::new(),
+            lut_reversed: false,
+            needs_display_update: false,
+            needs_gpu_update: false,
+            new_preset_name: String::new(),
+            paused: false,
+            pipeline_manager: None,
             preset_manager,
             preset_names,
-            selected_preset,
-            new_preset_name: String::new(),
+            previous_agent_count: 1_000_000,
+            previous_lut_index: current_lut_index,
+            queue: None,
             save_preset_dialog_open: false,
+            selected_preset,
+            settings_changed: false,
+            settings_have_changed: false,
+            settings: settings.clone(),
+            sim_size_buffer: None,
+            surface: None,
+            text_renderer: None,
+            trail_map_buffer: None,
+            ui_visible: true,
+            window: None,
         }
     }
 
@@ -1042,7 +1042,7 @@ impl App {
                                 preset_to_apply = Some(self.preset_names[prev_index].clone());
                             }
                             egui::ComboBox::from_id_salt("preset_selector")
-                                .selected_text(if self.settings_have_changed { "(unsaved)" } else { &self.selected_preset })
+                                .selected_text(if self.settings_changed { "(unsaved)" } else { &self.selected_preset })
                                 .show_ui(ui, |ui| {
                                     for name in &self.preset_names {
                                         if ui.selectable_label(&self.selected_preset == name, name).clicked() {
@@ -1266,58 +1266,58 @@ impl App {
                                             .spacing([40.0, 4.0])
                                             .striped(true)
                                             .show(ui, |ui| {
-                                                // Decay Factor with fine controls
-                                                ui.label("Decay Factor").on_hover_text("Controls how fast trails disappear. Increasing this is a great way to lighten a slime mold that's too dense. A normal value is 0.1% (1.0 internally).");
+                                                // Decay Rate with fine controls
+                                                ui.label("Decay Rate").on_hover_text("Controls how fast trails disappear. Increasing this is a great way to lighten a slime mold that's too dense. A normal value is 0.1% (1.0 internally).");
                                                 ui.horizontal(|ui| {
                                                     // Convert internal value to percent for display
-                                                    let mut decay_percent = self.settings.pheromone_decay_factor * 0.1; // 1.0 = 0.1%
-                                                    if ui.checkbox(&mut self.decay_factor_hi_range, "Lo/Hi").changed() {
+                                                    let mut decay_percent = self.settings.pheromone_decay_rate * 0.1; // 1.0 = 0.1%
+                                                    if ui.checkbox(&mut self.decay_rate_hi_range, "Lo/Hi").changed() {
                                                         // When switching to lo range, cap at 1%
-                                                        if !self.decay_factor_hi_range && decay_percent > 1.0 {
+                                                        if !self.decay_rate_hi_range && decay_percent > 1.0 {
                                                             decay_percent = 1.0;
-                                                            self.settings.pheromone_decay_factor = decay_percent / 0.1;
+                                                            self.settings.pheromone_decay_rate = decay_percent / 0.1;
                                                         }
                                                     }
                                                     if ui.button("−").clicked() {
-                                                        if self.decay_factor_hi_range {
+                                                        if self.decay_rate_hi_range {
                                                             decay_percent = (decay_percent - 0.1).max(0.0);
                                                         } else {
                                                             decay_percent = (decay_percent - 0.01).max(0.0);
                                                         }
-                                                        self.settings.pheromone_decay_factor = decay_percent / 0.1;
+                                                        self.settings.pheromone_decay_rate = decay_percent / 0.1;
                                                     }
                                                     if ui.add(egui::DragValue::new(&mut decay_percent)
-                                                        .range(0.0..=if self.decay_factor_hi_range { 100.0 } else { 10.0 })
-                                                        .speed(if self.decay_factor_hi_range { 0.1 } else { 0.01 })
+                                                        .range(0.0..=if self.decay_rate_hi_range { 100.0 } else { 10.0 })
+                                                        .speed(if self.decay_rate_hi_range { 0.1 } else { 0.01 })
                                                         .suffix("%")
                                                     ).changed() {
-                                                        self.settings.pheromone_decay_factor = decay_percent / 0.1;
+                                                        self.settings.pheromone_decay_rate = decay_percent / 0.1;
                                                     }
                                                     if ui.button("+").clicked() {
-                                                        if self.decay_factor_hi_range {
+                                                        if self.decay_rate_hi_range {
                                                             decay_percent = (decay_percent + 0.1).min(10.0);
                                                         } else {
                                                             decay_percent = (decay_percent + 0.01).min(1.0);
                                                         }
-                                                        self.settings.pheromone_decay_factor = decay_percent / 0.1;
+                                                        self.settings.pheromone_decay_rate = decay_percent / 0.1;
                                                     }
                                                 });
                                                 ui.end_row();
                                                 
-                                                // Deposition Amount with fine controls
-                                                ui.label("Deposition Amount").on_hover_text("At 0%, agents will not deposit any pheromones. At 100%, agents will saturate their location with the maximum amount of pheromones.");
+                                                // Deposition Rate with fine controls
+                                                ui.label("Deposition Rate").on_hover_text("At 0%, agents will not deposit any pheromones. At 100%, agents will saturate their location with the maximum amount of pheromones.");
                                                 ui.horizontal(|ui| {
-                                                    let mut deposition_percent = self.settings.pheromone_deposition_amount * 100.0;
+                                                    let mut deposition_percent = self.settings.pheromone_deposition_rate * 100.0;
                                                     if ui.button("−").clicked() {
                                                         deposition_percent = (deposition_percent - 1.0).max(0.0);
-                                                        self.settings.pheromone_deposition_amount = deposition_percent / 100.0;
+                                                        self.settings.pheromone_deposition_rate = deposition_percent / 100.0;
                                                     }
                                                     if ui.add(egui::DragValue::new(&mut deposition_percent).range(0.0..=100.0).speed(1.0).suffix("%")).changed() {
-                                                        self.settings.pheromone_deposition_amount = deposition_percent / 100.0;
+                                                        self.settings.pheromone_deposition_rate = deposition_percent / 100.0;
                                                     }
                                                     if ui.button("+").clicked() {
                                                         deposition_percent = (deposition_percent + 1.0).min(100.0);
-                                                        self.settings.pheromone_deposition_amount = deposition_percent / 100.0;
+                                                        self.settings.pheromone_deposition_rate = deposition_percent / 100.0;
                                                     }
                                                 });
                                                 ui.end_row();
@@ -1376,10 +1376,14 @@ impl App {
                                                 ui.horizontal(|ui| {
                                                     if ui.button("−").clicked() {
                                                         self.settings.agent_speed_min = (self.settings.agent_speed_min - 0.1).max(0.0);
+                                                        self.settings_changed = true;
                                                     }
-                                                    ui.add(egui::DragValue::new(&mut self.settings.agent_speed_min).range(0.0..=500.0).speed(0.1));
+                                                    if ui.add(egui::DragValue::new(&mut self.settings.agent_speed_min).range(0.0..=500.0).speed(1.0)).changed() {
+                                                        self.settings_changed = true;
+                                                    }
                                                     if ui.button("+").clicked() {
                                                         self.settings.agent_speed_min = (self.settings.agent_speed_min + 0.1).min(self.settings.agent_speed_max);
+                                                        self.settings_changed = true;
                                                     }
                                                 });
                                                 ui.end_row();
@@ -1389,28 +1393,35 @@ impl App {
                                                 ui.horizontal(|ui| {
                                                     if ui.button("−").clicked() {
                                                         self.settings.agent_speed_max = (self.settings.agent_speed_max - 0.1).max(self.settings.agent_speed_min);
+                                                        self.settings_changed = true;
                                                     }
-                                                    ui.add(egui::DragValue::new(&mut self.settings.agent_speed_max).range(0.0..=500.0).speed(0.1));
+                                                    if ui.add(egui::DragValue::new(&mut self.settings.agent_speed_max).range(0.0..=500.0).speed(1.0)).changed() {
+                                                        self.settings_changed = true;
+                                                    }
                                                     if ui.button("+").clicked() {
                                                         self.settings.agent_speed_max = (self.settings.agent_speed_max + 0.1).min(500.0);
+                                                        self.settings_changed = true;
                                                     }
                                                 });
                                                 ui.end_row();
                                                 
-                                                // Turn Speed with fine controls (convert radians to degrees for display)
-                                                ui.label("Turn Speed (deg/s)").on_hover_text("How quickly agents can change direction. Higher values create more dynamic, less predictable patterns.");
+                                                // Turn Rate with fine controls (convert radians to degrees for display)
+                                                ui.label("Turn Rate (deg/s)").on_hover_text("How quickly agents can change direction. Higher values create more dynamic, less predictable patterns.");
                                                 ui.horizontal(|ui| {
-                                                    let mut turn_speed_degrees = self.settings.agent_turn_speed * 180.0 / std::f32::consts::PI;
+                                                    let mut turn_rate_degrees = self.settings.agent_turn_rate * 180.0 / std::f32::consts::PI;
                                                     if ui.button("−").clicked() {
-                                                        turn_speed_degrees = (turn_speed_degrees - 1.0).max(0.0);
-                                                        self.settings.agent_turn_speed = turn_speed_degrees * std::f32::consts::PI / 180.0;
+                                                        turn_rate_degrees = (turn_rate_degrees - 1.0).max(0.0);
+                                                        self.settings.agent_turn_rate = turn_rate_degrees * std::f32::consts::PI / 180.0;
+                                                        self.settings_changed = true;
                                                     }
-                                                    if ui.add(egui::DragValue::new(&mut turn_speed_degrees).range(0.0..=360.0).speed(1.0).suffix(" deg/s")).changed() {
-                                                        self.settings.agent_turn_speed = turn_speed_degrees * std::f32::consts::PI / 180.0;
+                                                    if ui.add(egui::DragValue::new(&mut turn_rate_degrees).range(0.0..=360.0).speed(1.0).suffix(" deg/s")).changed() {
+                                                        self.settings.agent_turn_rate = turn_rate_degrees * std::f32::consts::PI / 180.0;
+                                                        self.settings_changed = true;
                                                     }
                                                     if ui.button("+").clicked() {
-                                                        turn_speed_degrees = (turn_speed_degrees + 1.0).min(360.0);
-                                                        self.settings.agent_turn_speed = turn_speed_degrees * std::f32::consts::PI / 180.0;
+                                                        turn_rate_degrees = (turn_rate_degrees + 1.0).min(360.0);
+                                                        self.settings.agent_turn_rate = turn_rate_degrees * std::f32::consts::PI / 180.0;
+                                                        self.settings_changed = true;
                                                     }
                                                 });
                                                 ui.end_row();
@@ -1420,10 +1431,14 @@ impl App {
                                                 ui.horizontal(|ui| {
                                                     if ui.button("−").clicked() {
                                                         self.settings.agent_jitter = (self.settings.agent_jitter - 0.001).max(0.0);
+                                                        self.settings_changed = true;
                                                     }
-                                                    ui.add(egui::DragValue::new(&mut self.settings.agent_jitter).range(0.0..=5.0).speed(0.001));
+                                                    if ui.add(egui::DragValue::new(&mut self.settings.agent_jitter).range(0.0..=5.0).speed(0.001)).changed() {
+                                                        self.settings_changed = true;
+                                                    }
                                                     if ui.button("+").clicked() {
                                                         self.settings.agent_jitter = (self.settings.agent_jitter + 0.001).min(5.0);
+                                                        self.settings_changed = true;
                                                     }
                                                 });
                                                 ui.end_row();
@@ -1435,13 +1450,16 @@ impl App {
                                                     if ui.button("−").clicked() {
                                                         sensor_angle_degrees = (sensor_angle_degrees - 0.5).max(0.0);
                                                         self.settings.agent_sensor_angle = sensor_angle_degrees * std::f32::consts::PI / 180.0;
+                                                        self.settings_changed = true;
                                                     }
                                                     if ui.add(egui::DragValue::new(&mut sensor_angle_degrees).range(0.0..=180.0).speed(0.5).suffix(" deg")).changed() {
                                                         self.settings.agent_sensor_angle = sensor_angle_degrees * std::f32::consts::PI / 180.0;
+                                                        self.settings_changed = true;
                                                     }
                                                     if ui.button("+").clicked() {
                                                         sensor_angle_degrees = (sensor_angle_degrees + 0.5).min(180.0);
                                                         self.settings.agent_sensor_angle = sensor_angle_degrees * std::f32::consts::PI / 180.0;
+                                                        self.settings_changed = true;
                                                     }
                                                 });
                                                 ui.end_row();
@@ -1451,10 +1469,14 @@ impl App {
                                                 ui.horizontal(|ui| {
                                                     if ui.button("−").clicked() {
                                                         self.settings.agent_sensor_distance = (self.settings.agent_sensor_distance - 1.0).max(0.0);
+                                                        self.settings_changed = true;
                                                     }
-                                                    ui.add(egui::DragValue::new(&mut self.settings.agent_sensor_distance).range(0.0..=500.0).speed(1.0));
+                                                    if ui.add(egui::DragValue::new(&mut self.settings.agent_sensor_distance).range(0.0..=500.0).speed(1.0)).changed() {
+                                                        self.settings_changed = true;
+                                                    }
                                                     if ui.button("+").clicked() {
                                                         self.settings.agent_sensor_distance = (self.settings.agent_sensor_distance + 1.0).min(500.0);
+                                                        self.settings_changed = true;
                                                     }
                                                 });
                                                 ui.end_row();
@@ -1483,10 +1505,14 @@ impl App {
                                                 ui.horizontal(|ui| {
                                                     if ui.button("−").clicked() {
                                                         start_angle = (start_angle - 1.0).max(0.0);
+                                                        self.settings_changed = true;
                                                     }
-                                                    ui.add(egui::DragValue::new(&mut start_angle).range(0.0..=360.0).speed(1.0));
+                                                    if ui.add(egui::DragValue::new(&mut start_angle).range(0.0..=360.0).speed(1.0)).changed() {
+                                                        self.settings_changed = true;
+                                                    }
                                                     if ui.button("+").clicked() {
                                                         start_angle = (start_angle + 1.0).min(end_angle);
+                                                        self.settings_changed = true;
                                                     }
                                                 });
                                                 ui.end_row();
@@ -1496,10 +1522,14 @@ impl App {
                                                 ui.horizontal(|ui| {
                                                     if ui.button("−").clicked() {
                                                         end_angle = (end_angle - 1.0).max(start_angle);
+                                                        self.settings_changed = true;
                                                     }
-                                                    ui.add(egui::DragValue::new(&mut end_angle).range(0.0..=360.0).speed(1.0));
+                                                    if ui.add(egui::DragValue::new(&mut end_angle).range(0.0..=360.0).speed(1.0)).changed() {
+                                                        self.settings_changed = true;
+                                                    }
                                                     if ui.button("+").clicked() {
                                                         end_angle = (end_angle + 1.0).min(360.0);
+                                                        self.settings_changed = true;
                                                     }
                                                 });
                                                 ui.end_row();
@@ -1557,34 +1587,42 @@ impl App {
                                                     ui.end_row();
 
                                                     // Center X
-                                                    ui.label("Center X").on_hover_text("Horizontal position of the gradient center (0-1). Affects where the gradient pattern is centered.");
+                                                    ui.label("Center X").on_hover_text("Horizontal position of the gradient center (0-100%). Affects where the gradient pattern is centered.");
                                                     ui.horizontal(|ui| {
+                                                        let mut center_x_percent = self.settings.gradient_center_x * 100.0;
                                                         if ui.button("−").clicked() {
-                                                            self.settings.gradient_center_x = (self.settings.gradient_center_x - 0.05).max(0.0);
+                                                            center_x_percent = (center_x_percent - 5.0).max(0.0);
+                                                            self.settings.gradient_center_x = center_x_percent / 100.0;
                                                             self.settings_changed = true;
                                                         }
-                                                        if ui.add(egui::DragValue::new(&mut self.settings.gradient_center_x).range(0.0..=1.0).speed(0.01)).changed() {
+                                                        if ui.add(egui::DragValue::new(&mut center_x_percent).range(0.0..=100.0).speed(1.0).suffix("%")).changed() {
+                                                            self.settings.gradient_center_x = center_x_percent / 100.0;
                                                             self.settings_changed = true;
                                                         }
                                                         if ui.button("+").clicked() {
-                                                            self.settings.gradient_center_x = (self.settings.gradient_center_x + 0.05).min(1.0);
+                                                            center_x_percent = (center_x_percent + 5.0).min(100.0);
+                                                            self.settings.gradient_center_x = center_x_percent / 100.0;
                                                             self.settings_changed = true;
                                                         }
                                                     });
                                                     ui.end_row();
 
                                                     // Center Y
-                                                    ui.label("Center Y").on_hover_text("Vertical position of the gradient center (0-1). Affects where the gradient pattern is centered.");
+                                                    ui.label("Center Y").on_hover_text("Vertical position of the gradient center (0-100%). Affects where the gradient pattern is centered.");
                                                     ui.horizontal(|ui| {
+                                                        let mut center_y_percent = self.settings.gradient_center_y * 100.0;
                                                         if ui.button("−").clicked() {
-                                                            self.settings.gradient_center_y = (self.settings.gradient_center_y - 0.05).max(0.0);
+                                                            center_y_percent = (center_y_percent - 5.0).max(0.0);
+                                                            self.settings.gradient_center_y = center_y_percent / 100.0;
                                                             self.settings_changed = true;
                                                         }
-                                                        if ui.add(egui::DragValue::new(&mut self.settings.gradient_center_y).range(0.0..=1.0).speed(0.01)).changed() {
+                                                        if ui.add(egui::DragValue::new(&mut center_y_percent).range(0.0..=100.0).speed(1.0).suffix("%")).changed() {
+                                                            self.settings.gradient_center_y = center_y_percent / 100.0;
                                                             self.settings_changed = true;
                                                         }
                                                         if ui.button("+").clicked() {
-                                                            self.settings.gradient_center_y = (self.settings.gradient_center_y + 0.05).min(1.0);
+                                                            center_y_percent = (center_y_percent + 5.0).min(100.0);
+                                                            self.settings.gradient_center_y = center_y_percent / 100.0;
                                                             self.settings_changed = true;
                                                         }
                                                     });

@@ -31,18 +31,18 @@ pub struct Settings {
     ///
     /// Defaults to 30.0.
     pub agent_speed_min: f32,
-    /// The speed at which the agent turns.
+    /// The rate at which agents can turn.
     ///
     /// Defaults to 0.43 rad/s.
-    pub agent_turn_speed: f32,
-    /// The decay factor of the pheromone.
+    pub agent_turn_rate: f32,
+    /// The decay rate of the pheromone.
     ///
     /// Defaults to 1.0.
-    pub pheromone_decay_factor: f32,
-    /// The amount of pheromone deposited by the agent.
+    pub pheromone_decay_rate: f32,
+    /// The rate at which agents deposit pheromones.
     ///
     /// Defaults to 1.0.
-    pub pheromone_deposition_amount: f32,
+    pub pheromone_deposition_rate: f32,
     /// The rate at which pheromone diffuses.
     ///
     /// Defaults to 1.0.
@@ -87,34 +87,6 @@ pub struct Settings {
     ///
     /// Defaults to 0.0.
     pub gradient_angle: f32,
-}
-
-impl PartialEq for Settings {
-    fn eq(&self, other: &Self) -> bool {
-        const EPSILON: f32 = 1e-6; // Small epsilon for floating-point comparisons
-
-        (self.agent_jitter - other.agent_jitter).abs() < EPSILON
-            && self.agent_possible_starting_headings == other.agent_possible_starting_headings
-            && (self.agent_sensor_angle - other.agent_sensor_angle).abs() < EPSILON
-            && (self.agent_sensor_distance - other.agent_sensor_distance).abs() < EPSILON
-            && (self.agent_speed_max - other.agent_speed_max).abs() < EPSILON
-            && (self.agent_speed_min - other.agent_speed_min).abs() < EPSILON
-            && (self.agent_turn_speed - other.agent_turn_speed).abs() < EPSILON
-            && (self.pheromone_decay_factor - other.pheromone_decay_factor).abs() < EPSILON
-            && (self.pheromone_deposition_amount - other.pheromone_deposition_amount).abs()
-                < EPSILON
-            && (self.pheromone_diffusion_rate - other.pheromone_diffusion_rate).abs() < EPSILON
-            && self.window_fullscreen == other.window_fullscreen
-            && self.window_height == other.window_height
-            && self.window_width == other.window_width
-            && self.gradient_enabled == other.gradient_enabled
-            && self.gradient_type == other.gradient_type
-            && (self.gradient_strength - other.gradient_strength).abs() < EPSILON
-            && (self.gradient_center_x - other.gradient_center_x).abs() < EPSILON
-            && (self.gradient_center_y - other.gradient_center_y).abs() < EPSILON
-            && (self.gradient_size - other.gradient_size).abs() < EPSILON
-            && (self.gradient_angle - other.gradient_angle).abs() < EPSILON
-    }
 }
 
 // Custom serialization for Range<f32>
@@ -178,9 +150,9 @@ impl Default for Settings {
             agent_sensor_distance: 20.0,
             agent_speed_max: 60.0,
             agent_speed_min: 30.0,
-            agent_turn_speed: 0.43, // ~25 degrees
-            pheromone_decay_factor: 1.0,
-            pheromone_deposition_amount: 1.0,
+            agent_turn_rate: 0.43, // ~25 degrees
+            pheromone_decay_rate: 1.0,
+            pheromone_deposition_rate: 1.0,
             pheromone_diffusion_rate: 1.0,
             window_fullscreen: false,
             window_height: 900,
