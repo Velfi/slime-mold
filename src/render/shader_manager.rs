@@ -27,8 +27,16 @@ impl ShaderManager {
                 "Gradient Compute Shader",
                 include_str!("../shaders/gradient.wgsl"),
             ),
-            quad_shader: Self::create_shader(device, "Quad Shader", include_str!("../shaders/quad.wgsl")),
-            text_shader: Self::create_shader(device, "Text Shader", include_str!("../shaders/text.wgsl")),
+            quad_shader: Self::create_shader(
+                device,
+                "Quad Shader",
+                include_str!("../shaders/quad.wgsl"),
+            ),
+            text_shader: Self::create_shader(
+                device,
+                "Text Shader",
+                include_str!("../shaders/text.wgsl"),
+            ),
         }
     }
 

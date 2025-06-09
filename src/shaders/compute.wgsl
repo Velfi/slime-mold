@@ -247,8 +247,9 @@ fn decay_trail(@builtin(global_invocation_id) id: vec3<u32>) {
     let wrapped_y = (y + sim_size.height) % sim_size.height;
     let wrapped_idx = wrapped_y * sim_size.width + wrapped_x;
     
-    let decay_factor = sim_size.decay_factor * 0.001;
-    trail_map[wrapped_idx] = max(trail_map[wrapped_idx] - decay_factor, 0.0);
+    // Apply decay factor (now 1.0 is normal value)
+    let decay_factor = sim_size.decay_factor * 0.001; // 1.0 = 0.1% decay per frame
+    trail_map[wrapped_idx] = max(0.0, trail_map[wrapped_idx] - decay_factor);
 }
 
 // Add a new compute entry point for diffusion

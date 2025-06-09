@@ -1,9 +1,8 @@
 //! Presets for the simulation
 
-use std::f32::consts::PI;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use serde::{Deserialize, Serialize};
 
 use crate::settings::Settings;
 
@@ -22,21 +21,23 @@ impl Preset {
 pub struct PresetManager {
     presets: Vec<Preset>,
     user_presets_dir: PathBuf,
+    built_in_preset_names: Vec<String>,
 }
 
 impl PresetManager {
     pub fn new() -> Self {
         let user_presets_dir = get_user_presets_dir();
-        let manager = Self { 
-            presets: vec![], 
+        let manager = Self {
+            presets: vec![],
             user_presets_dir,
+            built_in_preset_names: vec![],
         };
-        
+
         // Create the user presets directory if it doesn't exist
         if let Err(e) = fs::create_dir_all(&manager.user_presets_dir) {
             eprintln!("Warning: Could not create user presets directory: {}", e);
         }
-        
+
         manager
     }
 
@@ -52,17 +53,28 @@ impl PresetManager {
         self.presets.iter().map(|p| p.name.clone()).collect()
     }
 
+    /// Capture the current preset names as built-in presets
+    pub fn capture_built_in_presets(&mut self) {
+        self.built_in_preset_names = self.presets.iter().map(|p| p.name.clone()).collect();
+    }
+
     /// Save a preset to a TOML file in the user's Documents folder
-    pub fn save_user_preset(&self, name: &str, settings: &Settings) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_user_preset(
+        &self,
+        name: &str,
+        settings: &Settings,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let preset = Preset {
             name: name.to_string(),
             settings: settings.clone(),
         };
-        
+
         let toml_content = toml::to_string_pretty(&preset)?;
-        let file_path = self.user_presets_dir.join(format!("{}.toml", sanitize_filename(name)));
+        let file_path = self
+            .user_presets_dir
+            .join(format!("{}.toml", sanitize_filename(name)));
         fs::write(file_path, toml_content)?;
-        
+
         Ok(())
     }
 
@@ -73,11 +85,11 @@ impl PresetManager {
         }
 
         let entries = fs::read_dir(&self.user_presets_dir)?;
-        
+
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
-            
+
             if path.extension().and_then(|s| s.to_str()) == Some("toml") {
                 match self.load_preset_from_file(&path) {
                     Ok(preset) => {
@@ -92,7 +104,7 @@ impl PresetManager {
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -106,24 +118,26 @@ impl PresetManager {
     /// Delete a user preset file and remove it from memory
     pub fn delete_user_preset(&mut self, name: &str) -> Result<(), Box<dyn std::error::Error>> {
         let sanitized_name = sanitize_filename(name);
-        let file_path = self.user_presets_dir.join(format!("{}.toml", sanitized_name));
-        
+        let file_path = self
+            .user_presets_dir
+            .join(format!("{}.toml", sanitized_name));
+
         // Remove from file system
         if file_path.exists() {
             fs::remove_file(&file_path)?;
         }
-        
+
         // Also remove from memory immediately
         self.presets.retain(|p| p.name != name);
-        
+
         Ok(())
     }
 
     /// Get list of user preset files (without built-in presets)
     pub fn get_user_preset_names(&self) -> Vec<String> {
-        let built_in_names = get_built_in_preset_names();
-        self.presets.iter()
-            .filter(|p| !built_in_names.contains(&p.name))
+        self.presets
+            .iter()
+            .filter(|p| !self.built_in_preset_names.contains(&p.name))
             .map(|p| p.name.clone())
             .collect()
     }
@@ -137,9 +151,8 @@ impl Default for PresetManager {
 
 /// Get the user's Documents folder path and create the slime-mold presets subdirectory path
 fn get_user_presets_dir() -> PathBuf {
-    let home_dir = std::env::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."));
-    
+    let home_dir = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+
     home_dir.join("Documents").join("slime-mold-presets")
 }
 
@@ -153,22 +166,10 @@ fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
-/// Get list of built-in preset names
-fn get_built_in_preset_names() -> Vec<String> {
-    vec![
-        "Default".to_string(),
-        "Gloop Loops".to_string(),
-        "Firecracker Trees".to_string(),
-        "Threads".to_string(),
-        "Cells".to_string(),
-        "Snake".to_string(),
-        "Mesh".to_string(),
-    ]
-}
 
 pub fn init_preset_manager() -> PresetManager {
     let mut preset_manager = PresetManager::new();
-    
+
     // Add built-in presets
     preset_manager.add_preset(Preset::new("Default".to_string(), Settings::default()));
     preset_manager.add_preset(Preset::new(
@@ -179,6 +180,7 @@ pub fn init_preset_manager() -> PresetManager {
             agent_speed_max: 300.0,
             agent_sensor_angle: 0.7,
             agent_sensor_distance: 5.0,
+            pheromone_decay_factor: 3.5,
             ..Settings::default()
         },
     ));
@@ -190,7 +192,8 @@ pub fn init_preset_manager() -> PresetManager {
             agent_speed_min: 200.0,
             agent_speed_max: 300.0,
             agent_sensor_angle: 0.3,
-            agent_sensor_distance: 20.0,
+            pheromone_decay_factor: 10.0,
+
             ..Settings::default()
         },
     ));
@@ -200,19 +203,9 @@ pub fn init_preset_manager() -> PresetManager {
             agent_jitter: 0.0,
             agent_turn_speed: 0.02,
             agent_sensor_angle: 0.3,
+            agent_speed_min: 50.0,
             agent_speed_max: 150.0,
-            agent_sensor_distance: 20.0,
-            pheromone_decay_factor: 2.0,
-            ..Settings::default()
-        },
-    ));
-    preset_manager.add_preset(Preset::new(
-        "Cells".to_string(),
-        Settings {
-            agent_jitter: 0.6,
-            agent_turn_speed: 3.27,
-            agent_sensor_angle: PI,
-            agent_sensor_distance: 195.0,
+            pheromone_decay_factor: 5.0,
             ..Settings::default()
         },
     ));
@@ -226,21 +219,100 @@ pub fn init_preset_manager() -> PresetManager {
         },
     ));
     preset_manager.add_preset(Preset::new(
-        "Mesh".to_string(),
+        "Cells".to_string(),
         Settings {
-            agent_jitter: 3.0,
-            agent_turn_speed: 6.0,
-            agent_sensor_angle: 1.57,
-            agent_sensor_distance: 225.0,
-            pheromone_decay_factor: 10.0,
+            agent_jitter: 0.2,
+            agent_turn_speed: 3.27,
+            agent_speed_min: 200.0,
+            agent_speed_max: 300.0,
+            agent_sensor_angle: 1.95,
+            agent_sensor_distance: 60.0,
+            pheromone_decay_factor: 30.0,
             ..Settings::default()
         },
     ));
-    
+    preset_manager.add_preset(Preset::new(
+        "Net".to_string(),
+        Settings {
+            agent_jitter: 3.0,
+            agent_turn_speed: 6.0,
+            agent_speed_min: 100.0,
+            agent_speed_max: 100.0,
+            agent_sensor_angle: 1.57,
+            agent_sensor_distance: 225.0,
+            pheromone_decay_factor: 40.0,
+            ..Settings::default()
+        },
+    ));
+    preset_manager.add_preset(Preset::new(
+        "Bars".to_string(),
+        Settings {
+            agent_jitter: 3.949_936_4,
+            agent_sensor_angle: 2.193_287_4,
+            agent_sensor_distance: 443.473_57,
+            agent_speed_max: 482.086_7,
+            agent_speed_min: 426.720_86,
+            agent_turn_speed: 4.969_109_5,
+            pheromone_decay_factor: 100.0,
+            pheromone_deposition_amount: 0.435_905_75,
+            pheromone_diffusion_rate: 0.474_814_41,
+            gradient_enabled: false,
+            ..Settings::default()
+        },
+    ));
+    preset_manager.add_preset(Preset::new(
+        "Healthy Fungus".to_string(),
+        Settings {
+            agent_jitter: 3.164_667_1,
+            agent_sensor_angle: 1.250_608_9,
+            agent_sensor_distance: 8.729_994,
+            agent_speed_max: 479.033_1,
+            agent_speed_min: 294.058_1,
+            agent_turn_speed: 0.887_346_15,
+            pheromone_decay_factor: 100.0,
+            pheromone_deposition_amount: 0.525_721_9,
+            pheromone_diffusion_rate: 0.243_336_98,
+            ..Settings::default()
+        },
+    ));
+    preset_manager.add_preset(Preset::new(
+        "Sand On A Speaker".to_string(),
+        Settings {
+            agent_jitter: 2.991_177,
+            agent_sensor_angle: 0.642_961_9,
+            agent_sensor_distance: 144.372_2,
+            agent_speed_max: 447.087_68,
+            agent_speed_min: 416.390_87,
+            agent_turn_speed: 2.136_445_8,
+            pheromone_decay_factor: 100.0,
+            pheromone_deposition_amount: 0.633_740_1,
+            pheromone_diffusion_rate: 0.079_050_72,
+            ..Settings::default()
+        },
+    ));
+    preset_manager.add_preset(Preset::new(
+        "Spots".to_string(),
+        Settings {
+            agent_jitter: 0.254_688_26,
+            agent_sensor_angle: 1.547_680_5,
+            agent_sensor_distance: 31.146_05,
+            agent_speed_max: 350.695_13,
+            agent_speed_min: 300.851_14,
+            agent_turn_speed: 4.500_079_6,
+            pheromone_decay_factor: 100.0,
+            pheromone_deposition_amount: 0.228_417_04,
+            pheromone_diffusion_rate: 0.062_788_37,
+            ..Settings::default()
+        },
+    ));
+
+    // Capture all the built-in preset names we just added
+    preset_manager.capture_built_in_presets();
+
     // Load user presets from TOML files
     if let Err(e) = preset_manager.load_user_presets() {
         eprintln!("Warning: Could not load user presets: {}", e);
     }
-    
+
     preset_manager
 }

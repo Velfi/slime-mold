@@ -1,5 +1,5 @@
+use crate::settings::{GradientType, Settings};
 use bytemuck::{Pod, Zeroable};
-use crate::settings::{Settings, GradientType};
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -58,4 +58,4 @@ impl SimSizeUniform {
             _pad2: 0,
         }
     }
-} 
+}
