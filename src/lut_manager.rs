@@ -24,7 +24,7 @@ macro_rules! include_luts {
             $(
                 map.insert(
                     $name.strip_suffix(".lut").unwrap(),
-                    include_bytes!(concat!("../luts/", $name))
+                    include_bytes!(concat!("LUTs/", $name))
                 );
             )*
             map
