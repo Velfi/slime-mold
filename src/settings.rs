@@ -47,18 +47,6 @@ pub struct Settings {
     ///
     /// Defaults to 1.0.
     pub pheromone_diffusion_rate: f32,
-    /// Whether the window is fullscreen.
-    ///
-    /// Defaults to false.
-    pub window_fullscreen: bool,
-    /// The height of the window.
-    ///
-    /// Defaults to 900.
-    pub window_height: u32,
-    /// The width of the window.
-    ///
-    /// Defaults to 1600.
-    pub window_width: u32,
     /// The type of gradient.
     ///
     /// Defaults to GradientType::Disabled.
@@ -150,9 +138,6 @@ impl Default for Settings {
             pheromone_decay_rate: 1.0,
             pheromone_deposition_rate: 1.0,
             pheromone_diffusion_rate: 1.0,
-            window_fullscreen: false,
-            window_height: 900,
-            window_width: 1600,
             // Gradient defaults
             gradient_type: GradientType::Disabled,
             gradient_strength: 0.5,

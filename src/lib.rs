@@ -1,5 +1,7 @@
 pub mod app;
 pub mod egui_tools;
+pub mod frame_pacing;
+pub mod gpu_state;
 pub mod lut_manager;
 pub mod presets;
 pub mod render;
