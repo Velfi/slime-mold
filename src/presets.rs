@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use dirs::home_dir;
 
 use crate::settings::{GradientType, Settings};
 
@@ -151,9 +152,8 @@ impl Default for PresetManager {
 
 /// Get the user's Documents folder path and create the slime-mold presets subdirectory path
 fn get_user_presets_dir() -> PathBuf {
-    let home_dir = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
-
-    home_dir.join("Documents").join("slime-mold-presets")
+    let home_dir = home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home_dir.join("slime-mold").join("presets")
 }
 
 /// Sanitize filename to be safe for filesystem

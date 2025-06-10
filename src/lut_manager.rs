@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io;
+use dirs::home_dir;
 
 #[derive(Debug, Clone)]
 pub struct LutData {
@@ -14,6 +15,22 @@ impl LutData {
         self.red.reverse();
         self.green.reverse();
         self.blue.reverse();
+    }
+
+    pub fn from_raw_data(name: String, data: Vec<u8>) -> io::Result<Self> {
+        if data.len() != 768 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid LUT data size",
+            ));
+        }
+
+        Ok(Self {
+            name,
+            red: data[0..256].to_vec(),
+            green: data[256..512].to_vec(),
+            blue: data[512..768].to_vec(),
+        })
     }
 }
 
@@ -155,34 +172,91 @@ impl LutManager {
 
     pub fn get_available_luts(&self) -> Vec<String> {
         let mut luts: Vec<String> = EMBEDDED_LUTS.keys().map(|&name| name.to_string()).collect();
+        
+        // Add custom LUTs
+        if let Ok(custom_luts) = self.get_custom_luts() {
+            luts.extend(custom_luts);
+        }
+        
         luts.sort();
         luts
     }
 
     pub fn load_lut(&self, name: &str) -> io::Result<LutData> {
-        let buffer = EMBEDDED_LUTS.get(name).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, format!("LUT '{}' not found", name))
-        })?;
+        // Try to load from embedded LUTs first
+        if let Some(buffer) = EMBEDDED_LUTS.get(name) {
+            // Each color component should be 256 bytes
+            if buffer.len() != 768 {
+                // 256 * 3 (RGB)
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Invalid LUT file size",
+                ));
+            }
 
-        // Each color component should be 256 bytes
-        if buffer.len() != 768 {
-            // 256 * 3 (RGB)
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid LUT file size",
-            ));
+            let red = buffer[0..256].to_vec();
+            let green = buffer[256..512].to_vec();
+            let blue = buffer[512..768].to_vec();
+
+            return Ok(LutData {
+                name: name.to_string(),
+                red,
+                green,
+                blue,
+            });
         }
 
-        let red = buffer[0..256].to_vec();
-        let green = buffer[256..512].to_vec();
-        let blue = buffer[512..768].to_vec();
+        // If not found in embedded LUTs, try to load as a custom LUT
+        self.load_custom_lut(name)
+    }
 
-        Ok(LutData {
-            name: name.to_string(),
-            red,
-            green,
-            blue,
-        })
+    fn get_lut_dir() -> io::Result<std::path::PathBuf> {
+        let home_dir = home_dir().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "Could not find home directory")
+        })?;
+        
+        let lut_dir = home_dir.join("slime-mold").join("LUTs");
+        Ok(lut_dir)
+    }
+
+    pub fn save_custom_lut(&self, name: &str, data: &[u8]) -> io::Result<()> {
+        // Create LUTs directory if it doesn't exist
+        let lut_dir = Self::get_lut_dir()?;
+        if !lut_dir.exists() {
+            std::fs::create_dir_all(&lut_dir)?;
+        }
+
+        // Save the LUT file
+        let file_path = lut_dir.join(format!("{}.lut", name));
+        std::fs::write(file_path, data)?;
+
+        Ok(())
+    }
+
+    pub fn get_custom_luts(&self) -> io::Result<Vec<String>> {
+        let lut_dir = Self::get_lut_dir()?;
+        if !lut_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut custom_luts = Vec::new();
+        for entry in std::fs::read_dir(lut_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("lut") {
+                if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
+                    custom_luts.push(name.to_string());
+                }
+            }
+        }
+
+        Ok(custom_luts)
+    }
+
+    pub fn load_custom_lut(&self, name: &str) -> io::Result<LutData> {
+        let file_path = Self::get_lut_dir()?.join(format!("{}.lut", name));
+        let data = std::fs::read(file_path)?;
+        LutData::from_raw_data(name.to_string(), data)
     }
 }
 

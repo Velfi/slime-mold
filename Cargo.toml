@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 bytemuck = { version = "1.23.0", features = ["derive"] }
+dirs = "5.0"
 egui = "0.31.1"
 egui-wgpu = { version = "0.31.1", features = ["winit"] }
 lazy_static = "1.5.0"

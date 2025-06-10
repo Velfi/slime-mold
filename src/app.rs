@@ -3,6 +3,7 @@ use crate::gpu_state::GpuState;
 use crate::lut_manager::LutManager;
 use crate::presets::init_preset_manager;
 use crate::settings::Settings;
+use crate::gradient_editor::GradientEditor;
 use std::collections::HashMap;
 use std::time::Duration;
 use winit::application::ApplicationHandler;
@@ -58,6 +59,14 @@ pub struct App {
 
     // Frame pacing state
     frame_pacing: FramePacing,
+
+    // Gradient editor
+    gradient_editor: GradientEditor,
+    custom_lut_name: String,
+    show_gradient_editor: bool,
+
+    // Add a field to track previous show_gradient_editor state
+    prev_show_gradient_editor: bool,
 }
 
 impl ApplicationHandler for App {
@@ -121,16 +130,26 @@ impl ApplicationHandler for App {
             } = &event
             {
                 if key_event.state.is_pressed() {
-                    if let winit::keyboard::Key::Character(c) = &key_event.logical_key {
-                        if c == "/" {
-                            self.ui_visible = !self.ui_visible;
-                        } else if c == "r" {
-                            self.agent_count =
-                                randomize_settings(&mut self.settings, self.agent_count);
+                    // Check if any text input is focused
+                    let text_input_focused = if let Some(gpu_state) = &self.gpu_state {
+                        gpu_state.egui_renderer.context().memory(|mem| mem.focused().is_some())
+                    } else {
+                        false
+                    };
 
-                            // Mark settings as changed
-                            self.settings_changed = true;
-                            self.needs_display_update = true;
+                    // Only handle hotkeys if no text input is focused
+                    if !text_input_focused {
+                        if let winit::keyboard::Key::Character(c) = &key_event.logical_key {
+                            if c == "/" {
+                                self.ui_visible = !self.ui_visible;
+                            } else if c == "r" {
+                                self.agent_count =
+                                    randomize_settings(&mut self.settings, self.agent_count);
+
+                                // Mark settings as changed
+                                self.settings_changed = true;
+                                self.needs_display_update = true;
+                            }
                         }
                     }
                 }
@@ -241,6 +260,11 @@ impl App {
             fps_limit_enabled: false,
             fps_limit: 60.0,
             frame_pacing: FramePacing::new(60.0),
+            gradient_editor: GradientEditor::new(),
+            custom_lut_name: String::new(),
+            show_gradient_editor: false,
+            // Add a field to track previous show_gradient_editor state
+            prev_show_gradient_editor: false,
         }
     }
 
@@ -308,8 +332,22 @@ impl App {
             self.needs_display_update = true;
         }
 
-        // Update LUT if it has changed
-        if self.current_lut_index != self.previous_lut_index {
+        // Update LUT if it has changed, or if the gradient editor is open and the gradient changes
+        if self.show_gradient_editor {
+            if let Some(gpu_state) = &mut self.gpu_state {
+                // Generate LUT from the gradient editor
+                let lut_vec = self.gradient_editor.generate_lut();
+                // Convert to LutData
+                let lut_data = crate::lut_manager::LutData {
+                    name: "gradient_editor_preview".to_string(),
+                    red: lut_vec[0..256].to_vec(),
+                    green: lut_vec[256..512].to_vec(),
+                    blue: lut_vec[512..768].to_vec(),
+                };
+                gpu_state.update_lut(&lut_data);
+                // No need to update previous_lut_index here
+            }
+        } else if self.current_lut_index != self.previous_lut_index {
             if let Some(gpu_state) = &mut self.gpu_state {
                 if let Ok(mut new_lut_data) = self
                     .lut_manager
@@ -653,6 +691,54 @@ impl App {
                                             // Force LUT reload
                                             self.previous_lut_index = usize::MAX;
                                         }
+
+                                        // Add gradient editor button
+                                        if ui.button("🎨 Create Custom LUT").clicked() {
+                                            self.show_gradient_editor = true;
+                                        }
+
+                                        // Show gradient editor window
+                                        if self.show_gradient_editor {
+                                            egui::Window::new("Gradient Editor")
+                                                .collapsible(false)
+                                                .resizable(true)
+                                                .default_size([300.0, 150.0])
+                                                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                                                .show(ctx, |ui| {
+                                                    if self.gradient_editor.show(ui) {
+                                                        // Update preview when gradient changes
+                                                        self.needs_display_update = true;
+                                                    }
+
+                                                    ui.horizontal(|ui| {
+                                                        ui.label("LUT Name:");
+                                                        ui.text_edit_singleline(&mut self.custom_lut_name);
+                                                    });
+
+                                                    ui.horizontal(|ui| {
+                                                        if ui.button("Save LUT").clicked() {
+                                                            if !self.custom_lut_name.trim().is_empty() {
+                                                                let lut_data = self.gradient_editor.generate_lut();
+                                                                if let Err(e) = self.lut_manager.save_custom_lut(&self.custom_lut_name, &lut_data) {
+                                                                    eprintln!("Failed to save LUT: {}", e);
+                                                                } else {
+                                                                    // Reload available LUTs
+                                                                    self.available_luts = self.lut_manager.get_available_luts();
+                                                                    // Select the new LUT
+                                                                    if let Some(idx) = self.available_luts.iter().position(|name| name == &self.custom_lut_name) {
+                                                                        self.current_lut_index = idx;
+                                                                    }
+                                                                    self.show_gradient_editor = false;
+                                                                }
+                                                            }
+                                                        }
+                                                        if ui.button("Cancel").clicked() {
+                                                            self.show_gradient_editor = false;
+                                                        }
+                                                    });
+                                                });
+                                        }
+
                                         ui.separator();
 
                                         // Controls
@@ -853,14 +939,14 @@ impl App {
                                                 ui.label("Jitter").on_hover_text("Random movement added to agent direction. Higher values create more chaotic, less organized patterns.");
                                                 ui.horizontal(|ui| {
                                                     if ui.button("−").clicked() {
-                                                        self.settings.agent_jitter = (self.settings.agent_jitter - 0.001).max(0.0);
+                                                        self.settings.agent_jitter = (self.settings.agent_jitter - 0.01).max(0.0);
                                                         self.settings_changed = true;
                                                     }
-                                                    if ui.add(egui::DragValue::new(&mut self.settings.agent_jitter).range(0.0..=5.0).speed(0.001)).changed() {
+                                                    if ui.add(egui::DragValue::new(&mut self.settings.agent_jitter).range(0.0..=5.0).speed(0.01)).changed() {
                                                         self.settings_changed = true;
                                                     }
                                                     if ui.button("+").clicked() {
-                                                        self.settings.agent_jitter = (self.settings.agent_jitter + 0.001).min(5.0);
+                                                        self.settings.agent_jitter = (self.settings.agent_jitter + 0.01).min(5.0);
                                                         self.settings_changed = true;
                                                     }
                                                 });
@@ -1172,6 +1258,20 @@ impl App {
                 frame.present();
             }
         }
+
+        // Reset gradient editor state if it was just closed
+        if self.prev_show_gradient_editor && !self.show_gradient_editor {
+            // Reload the current LUT
+            if let Some(gpu_state) = &mut self.gpu_state {
+                if let Ok(mut new_lut_data) = self.lut_manager.load_lut(&self.available_luts[self.current_lut_index]) {
+                    if self.lut_reversed {
+                        new_lut_data.reverse();
+                    }
+                    gpu_state.update_lut(&new_lut_data);
+                }
+            }
+        }
+        self.prev_show_gradient_editor = self.show_gradient_editor;
     }
 }
 
