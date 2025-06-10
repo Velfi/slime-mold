@@ -1,5 +1,28 @@
 # Changelog
 
+## [v2.0.0-beta.2]
+
+### Added
+- Added FPS limiting with configurable target
+- Added frame pacing system for smoother performance
+- Added high/low range toggle for decay rate control
+- Added fine control buttons for decay rate and deposition rate
+- Added window title with FPS display
+- Added support for up to 50 million agents
+
+### Changed
+- Improved agent repulsion system with workgroup-based approach
+- Optimized GPU buffer management and texture handling
+- Updated default settings for better performance
+- Enhanced UI controls for simulation parameters
+- Improved shader organization and performance
+
+### Fixed
+- Fixed agent count handling to prevent buffer overruns
+- Fixed decay rate calculation and display
+- Fixed texture dimension handling for large displays
+- Fixed agent movement and wrapping behavior
+
 ## [v2.0.0-beta.1]
 
 ### Added
