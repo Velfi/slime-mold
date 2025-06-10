@@ -1898,7 +1898,7 @@ dependencies = [
 
 [[package]]
 name = "slime-mold"
-version = "2.0.0-beta.1"
+version = "2.0.0-beta.2"
 dependencies = [
  "bytemuck",
  "console_error_panic_hook",
