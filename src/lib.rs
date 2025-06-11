@@ -1,4 +1,5 @@
 pub mod app;
+pub mod buffer_pool;
 pub mod egui_tools;
 pub mod frame_pacing;
 pub mod gradient_editor;
@@ -8,6 +9,7 @@ pub mod presets;
 pub mod render;
 pub mod settings;
 pub mod simulation;
+pub mod workgroup_optimizer;
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;

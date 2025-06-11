@@ -159,7 +159,13 @@ lazy_static::lazy_static! {
         "KTZ_poc_Purple.lut",
         "KTZ_rgb_Blue.lut",
         "KTZ_rgb_Green.lut",
-        "KTZ_rgb_Red.lut"
+        "KTZ_rgb_Red.lut",
+        "ZELDA_Glass.lut",
+        "ZELDA_Monochrome.lut",
+        "ZELDA_Rainbow.lut",
+        "ZELDA_Slava Ukraini.lut",
+        "ZELDA_Terrain.lut",
+        "ZELDA_Trans Rights.lut"
     );
 }
 

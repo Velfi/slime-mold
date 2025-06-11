@@ -67,6 +67,9 @@ pub struct App {
 
     // Add a field to track previous show_gradient_editor state
     prev_show_gradient_editor: bool,
+
+    // Frame counter for optimization
+    frame_counter: u32,
 }
 
 impl ApplicationHandler for App {
@@ -265,6 +268,8 @@ impl App {
             show_gradient_editor: false,
             // Add a field to track previous show_gradient_editor state
             prev_show_gradient_editor: false,
+            // Frame counter for optimization
+            frame_counter: 0,
         }
     }
 
@@ -390,9 +395,9 @@ impl App {
                             &[],
                         );
                         cpass.dispatch_workgroups(
-                            (gpu_state.config().width * gpu_state.config().height)
-                                .div_ceil(256)
-                                .min(65535),
+                            gpu_state.workgroup_config().workgroups_gradient(
+                                gpu_state.config().width * gpu_state.config().height
+                            ),
                             1,
                             1,
                         );
@@ -400,7 +405,9 @@ impl App {
 
                     // Only run simulation updates when not paused
                     if !self.paused {
-                        // Update agent positions
+                        self.frame_counter += 1;
+                        
+                        // Update agent positions (always every frame)
                         cpass.set_pipeline(&gpu_state.pipeline_manager().compute_pipeline);
                         cpass.set_bind_group(
                             0,
@@ -408,40 +415,46 @@ impl App {
                             &[],
                         );
                         cpass.dispatch_workgroups(
-                            (self.agent_count as u32).div_ceil(256).min(65535),
+                            gpu_state.workgroup_config().workgroups_1d(
+                                self.agent_count as u32
+                            ),
                             1,
                             1,
                         );
 
-                        // Decay trail map
-                        cpass.set_pipeline(&gpu_state.pipeline_manager().decay_pipeline);
-                        cpass.set_bind_group(
-                            0,
-                            &gpu_state.bind_group_manager().compute_bind_group,
-                            &[],
-                        );
-                        cpass.dispatch_workgroups(
-                            (gpu_state.config().width * gpu_state.config().height)
-                                .div_ceil(256)
-                                .min(65535),
-                            1,
-                            1,
-                        );
+                        // Decay trail map (respect frequency setting)
+                        if self.frame_counter % self.settings.decay_frequency == 0 {
+                            cpass.set_pipeline(&gpu_state.pipeline_manager().decay_pipeline);
+                            cpass.set_bind_group(
+                                0,
+                                &gpu_state.bind_group_manager().compute_bind_group,
+                                &[],
+                            );
+                            cpass.dispatch_workgroups(
+                                gpu_state.workgroup_config().workgroups_1d(
+                                    gpu_state.config().width * gpu_state.config().height
+                                ),
+                                1,
+                                1,
+                            );
+                        }
 
-                        // Diffuse trail map
-                        cpass.set_pipeline(&gpu_state.pipeline_manager().diffuse_pipeline);
-                        cpass.set_bind_group(
-                            0,
-                            &gpu_state.bind_group_manager().compute_bind_group,
-                            &[],
-                        );
-                        cpass.dispatch_workgroups(
-                            (gpu_state.config().width * gpu_state.config().height)
-                                .div_ceil(256)
-                                .min(65535),
-                            1,
-                            1,
-                        );
+                        // Diffuse trail map (respect frequency setting)
+                        if self.frame_counter % self.settings.diffusion_frequency == 0 {
+                            cpass.set_pipeline(&gpu_state.pipeline_manager().diffuse_pipeline);
+                            cpass.set_bind_group(
+                                0,
+                                &gpu_state.bind_group_manager().compute_bind_group,
+                                &[],
+                            );
+                            cpass.dispatch_workgroups(
+                                gpu_state.workgroup_config().workgroups_1d(
+                                    gpu_state.config().width * gpu_state.config().height
+                                ),
+                                1,
+                                1,
+                            );
+                        }
                     }
 
                     // Always update display (even when paused) to show current state
@@ -452,11 +465,11 @@ impl App {
                             &gpu_state.bind_group_manager().display_bind_group,
                             &[],
                         );
-                        cpass.dispatch_workgroups(
-                            gpu_state.config().width.div_ceil(16).min(65535),
-                            gpu_state.config().height.div_ceil(16).min(65535),
-                            1,
+                        let (x_groups, y_groups) = gpu_state.workgroup_config().workgroups_2d(
+                            gpu_state.config().width, 
+                            gpu_state.config().height
                         );
+                        cpass.dispatch_workgroups(x_groups, y_groups, 1);
                         self.needs_display_update = false;
                     }
                 }
@@ -629,8 +642,11 @@ impl App {
                                                         ui.horizontal(|ui| {
                                                             // Use cache for LUT preview
                                                             let cache_key = (lut_name.clone(), self.lut_reversed);
+                                                            println!("Generating preview for LUT: {}", lut_name);
                                                             let preview = self.lut_preview_cache.entry(cache_key.clone()).or_insert_with(|| {
+                                                                println!("Cache miss for LUT: {}", lut_name);
                                                                 if let Ok(mut lut_data) = self.lut_manager.load_lut(lut_name) {
+                                                                    println!("Successfully loaded LUT data for: {}", lut_name);
                                                                     if self.lut_reversed {
                                                                         lut_data.reverse();
                                                                     }
@@ -643,6 +659,7 @@ impl App {
                                                                         )
                                                                     }).collect::<Vec<_>>()
                                                                 } else {
+                                                                    println!("Failed to load LUT data for: {}", lut_name);
                                                                     // Fallback: gray gradient
                                                                     (0..256).map(|idx| egui::Color32::from_gray(idx as u8)).collect::<Vec<_>>()
                                                                 }

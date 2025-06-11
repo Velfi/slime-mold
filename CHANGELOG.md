@@ -11,7 +11,6 @@
 - Added support for up to 50 million agents
 
 ### Changed
-- Improved agent repulsion system with workgroup-based approach
 - Optimized GPU buffer management and texture handling
 - Updated default settings for better performance
 - Enhanced UI controls for simulation parameters

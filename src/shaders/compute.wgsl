@@ -61,6 +61,17 @@ fn sample_trail_map(pos: vec2<f32>) -> f32 {
     return mix(v0, v1, dy);
 }
 
+// Fast sampling using nearest neighbor (much faster)
+fn sample_trail_map_fast(pos: vec2<f32>) -> f32 {
+    let width = i32(sim_size.width);
+    let height = i32(sim_size.height);
+    
+    let x = ((i32(round(pos.x)) % width) + width) % width;
+    let y = ((i32(round(pos.y)) % height) + height) % height;
+    
+    return trail_map[y * width + x];
+}
+
 // Helper function to sample gradient map
 fn sample_gradient_map(pos: vec2<f32>) -> f32 {
     let width = i32(sim_size.width);
@@ -96,11 +107,24 @@ fn sample_combined_map(pos: vec2<f32>) -> f32 {
     return trail_value + gradient_value;
 }
 
+// Fast combined sampling for performance-critical paths
+fn sample_combined_map_fast(pos: vec2<f32>) -> f32 {
+    let trail_value = sample_trail_map_fast(pos);
+    var gradient_value: f32;
+    if (sim_size.gradient_enabled == 1u) {
+        let width = i32(sim_size.width);
+        let height = i32(sim_size.height);
+        let x = ((i32(round(pos.x)) % width) + width) % width;
+        let y = ((i32(round(pos.y)) % height) + height) % height;
+        gradient_value = gradient_map[y * width + x];
+    } else {
+        gradient_value = 0.0;
+    }
+    return trail_value + gradient_value;
+}
+
 // Parameters for the simulation (now mostly from uniform)
 const TIME_STEP: f32 = 0.016; // Affects how far agents move per frame based on their speed
-
-// Add grid cell size constant
-const GRID_CELL_SIZE: f32 = 10.0;  // Should be larger than repulsion radius
 
 // Constants for spatial partitioning
 const WORKGROUP_SIZE_X: u32 = 16u;
@@ -146,8 +170,9 @@ fn update_agents(
     );
     
     // Sample combined trail + gradient maps at sensor positions
-    let left_value = sample_combined_map(left_pos);
-    let right_value = sample_combined_map(right_pos);
+    // Use fast sampling for better performance (sacrifices some accuracy for speed)
+    let left_value = sample_combined_map_fast(left_pos);
+    let right_value = sample_combined_map_fast(right_pos);
     
     // Update angle based on sensor readings
     if (left_value > right_value) {
@@ -168,43 +193,6 @@ fn update_agents(
     let move_dist = speed * TIME_STEP;
     x = x + move_dist * cos(angle);
     y = y + move_dist * sin(angle);
-
-    // Calculate repulsion using workgroup-based approach
-    var repulsion_force = vec2<f32>(0.0, 0.0);
-    let repulsion_radius = 8.0;  // Increased from 5.0 to 8.0
-    let repulsion_strength = 2.0;  // Fixed constant value since agent_repulsion_strength was removed
-
-    // Calculate cell coordinates
-    let cell_x = i32(x / CELL_SIZE);
-    let cell_y = i32(y / CELL_SIZE);
-
-    // Store agent in shared memory
-    let local_index = i32(local_id.x);
-    local_agents[local_index] = vec4<f32>(x, y, angle, speed);
-    workgroupBarrier();
-
-    // Check repulsion against agents in the same workgroup
-    for (var i = 0; i < i32(WORKGROUP_SIZE_X * WORKGROUP_SIZE_Y); i++) {
-        if (i == local_index) {
-            continue;  // Skip self
-        }
-
-        let other_agent = local_agents[i];
-        let dx = other_agent.x - x;
-        let dy = other_agent.y - y;
-        let dist_sq = dx * dx + dy * dy;
-
-        if (dist_sq < repulsion_radius * repulsion_radius) {
-            let dist = sqrt(dist_sq);
-            // Modified force calculation to be stronger at close range
-            let force = repulsion_strength * pow(1.0 - dist / repulsion_radius, 2.0);
-            repulsion_force += vec2<f32>(-dx / dist, -dy / dist) * force;
-        }
-    }
-
-    // Apply repulsion force
-    x += repulsion_force.x;
-    y += repulsion_force.y;
 
     // Apply jitter
     let jitter_strength = sim_size.agent_jitter;

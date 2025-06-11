@@ -2,10 +2,11 @@ use crate::egui_tools::EguiRenderer;
 use crate::lut_manager::LutManager;
 use crate::render::{
     bind_group_manager::BindGroupManager, pipeline_manager::PipelineManager,
-    shader_manager::ShaderManager,
 };
 use crate::settings::Settings;
 use crate::simulation::SimSizeUniform;
+use crate::workgroup_optimizer::WorkgroupConfig;
+use crate::buffer_pool::BufferPool;
 use std::sync::Arc;
 use tracing::debug;
 use wgpu::util::DeviceExt;
@@ -34,6 +35,17 @@ pub struct GpuState {
     display_texture: wgpu::Texture,
     display_view: wgpu::TextureView,
     display_sampler: wgpu::Sampler,
+    
+    // Workgroup optimization
+    workgroup_config: WorkgroupConfig,
+    
+    // Buffer pool for efficient buffer reuse
+    buffer_pool: BufferPool,
+    
+    // Track current buffer sizes for returning to pool
+    current_trail_map_size: u64,
+    current_gradient_buffer_size: u64,
+    current_agent_buffer_size: u64,
 }
 
 impl GpuState {
@@ -195,8 +207,9 @@ impl GpuState {
         });
 
         // Initialize shader and pipeline managers
-        let shader_manager = ShaderManager::new(&device);
-        let pipeline_manager = PipelineManager::new(&device, &shader_manager);
+        let adapter_info = adapter.get_info();
+        let workgroup_config = WorkgroupConfig::new(&device, &adapter_info);
+        let pipeline_manager = PipelineManager::new(&device, &workgroup_config);
 
         // Load LUT
         let mut lut_data = lut_manager.load_lut(&available_luts[current_lut_index])?;
@@ -251,6 +264,13 @@ impl GpuState {
         let egui_renderer = EguiRenderer::new(device.as_ref(), surface_format, None, 1, &window);
         egui_renderer.context().set_visuals(egui::Visuals::dark());
 
+        // Initialize buffer pool
+        let buffer_pool = BufferPool::new();
+        
+        // Track initial buffer sizes
+        let trail_map_size_bytes = (trail_map_size * std::mem::size_of::<f32>()) as u64;
+        let agent_buffer_size_bytes = (agent_count * 4 * std::mem::size_of::<f32>()) as u64;
+
         Ok(Self {
             window,
             surface,
@@ -268,6 +288,11 @@ impl GpuState {
             display_texture,
             display_view,
             display_sampler,
+            workgroup_config,
+            buffer_pool,
+            current_trail_map_size: trail_map_size_bytes,
+            current_gradient_buffer_size: trail_map_size_bytes,
+            current_agent_buffer_size: agent_buffer_size_bytes,
         })
     }
 
@@ -289,40 +314,130 @@ impl GpuState {
     }
 
     pub fn recreate_agent_buffer(&mut self, agent_count: usize, settings: &Settings) {
-        self.agent_buffer = create_agent_buffer(
+        // Return old buffer to pool
+        let old_agent_buffer = std::mem::replace(
+            &mut self.agent_buffer,
+            // Temporary placeholder
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Temp Agent Buffer"),
+                size: 1,
+                usage: BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        );
+        self.buffer_pool.return_buffer(
+            old_agent_buffer,
+            self.current_agent_buffer_size,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        );
+
+        // Create new buffer using pool
+        self.agent_buffer = create_agent_buffer_pooled(
+            &mut self.buffer_pool,
             &self.device,
+            &self.queue,
             agent_count,
             self.config.width,
             self.config.height,
             settings,
         );
+        
+        // Update current size
+        self.current_agent_buffer_size = (agent_count * 4 * std::mem::size_of::<f32>()) as u64;
+        
         self.recreate_bind_groups();
     }
 
     pub fn resize_buffers(&mut self, agent_count: usize, settings: &Settings) {
+        // Buffer pools implemented! This significantly improves performance during buffer size changes
         self.config.width = self.window.inner_size().width;
         self.config.height = self.window.inner_size().height;
         self.surface.configure(&self.device, &self.config);
 
-        // Recreate trail map buffer with new dimensions
+        // Calculate new buffer sizes
         let trail_map_size = (self.config.width * self.config.height) as usize;
-        self.trail_map_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Trail Map Buffer"),
-            size: (trail_map_size * std::mem::size_of::<f32>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let trail_map_size_bytes = (trail_map_size * std::mem::size_of::<f32>()) as u64;
+        let agent_buffer_size_bytes = (agent_count * 4 * std::mem::size_of::<f32>()) as u64;
 
-        // Recreate agent buffer with new dimensions
-        self.agent_buffer = create_agent_buffer(
+        // Return old buffers to pool before creating new ones
+        let old_trail_map_buffer = std::mem::replace(
+            &mut self.trail_map_buffer,
+            // Temporary placeholder - will be replaced immediately
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Temp Trail Map Buffer"),
+                size: 1,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        );
+        self.buffer_pool.return_buffer(
+            old_trail_map_buffer,
+            self.current_trail_map_size,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        );
+
+        let old_gradient_buffer = std::mem::replace(
+            &mut self.gradient_buffer,
+            // Temporary placeholder - will be replaced immediately
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Temp Gradient Buffer"),
+                size: 1,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        );
+        self.buffer_pool.return_buffer(
+            old_gradient_buffer,
+            self.current_gradient_buffer_size,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        );
+
+        let old_agent_buffer = std::mem::replace(
+            &mut self.agent_buffer,
+            // Temporary placeholder - will be replaced immediately
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Temp Agent Buffer"),
+                size: 1,
+                usage: BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        );
+        self.buffer_pool.return_buffer(
+            old_agent_buffer,
+            self.current_agent_buffer_size,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        );
+
+        // Get new buffers from pool (or create new if none available)
+        self.trail_map_buffer = self.buffer_pool.get_buffer(
             &self.device,
+            Some("Trail Map Buffer"),
+            trail_map_size_bytes,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        );
+
+        self.gradient_buffer = self.buffer_pool.get_buffer(
+            &self.device,
+            Some("Gradient Buffer"),
+            trail_map_size_bytes,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        );
+
+        // For agent buffer, we need special handling since it needs initialization
+        self.agent_buffer = create_agent_buffer_pooled(
+            &mut self.buffer_pool,
+            &self.device,
+            &self.queue,
             agent_count,
             self.config.width,
             self.config.height,
             settings,
         );
+
+        // Update current sizes
+        self.current_trail_map_size = trail_map_size_bytes;
+        self.current_gradient_buffer_size = trail_map_size_bytes;
+        self.current_agent_buffer_size = agent_buffer_size_bytes;
 
         // Recreate display texture with new dimensions
         let max_texture_dimension = self.device.limits().max_texture_dimension_2d;
@@ -347,16 +462,6 @@ impl GpuState {
         self.display_view = self
             .display_texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Recreate gradient buffer with new dimensions
-        self.gradient_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Gradient Buffer"),
-            size: (trail_map_size * std::mem::size_of::<f32>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
 
         // Update bind groups with new buffers and texture view
         self.recreate_bind_groups();
@@ -408,6 +513,7 @@ impl GpuState {
             &self.queue,
             &self.pipeline_manager,
             &self.bind_group_manager,
+            &self.workgroup_config,
             agent_count,
         );
     }
@@ -438,6 +544,62 @@ impl GpuState {
     pub fn pipeline_manager(&self) -> &PipelineManager {
         &self.pipeline_manager
     }
+
+    pub fn workgroup_config(&self) -> &WorkgroupConfig {
+        &self.workgroup_config
+    }
+
+    /// Get buffer pool statistics for debugging
+    pub fn buffer_pool_stats(&self) -> crate::buffer_pool::BufferPoolStats {
+        self.buffer_pool.memory_stats()
+    }
+
+    /// Clear buffer pool (useful for freeing memory)
+    pub fn clear_buffer_pool(&mut self) {
+        self.buffer_pool.clear();
+    }
+}
+
+impl Drop for GpuState {
+    fn drop(&mut self) {
+        // Return all buffers to pool before dropping
+        // This isn't strictly necessary since everything will be dropped anyway,
+        // but it's good practice and helps with debugging buffer pool usage
+        
+        debug!("Dropping GpuState, returning buffers to pool");
+        
+        // Create temporary placeholder buffers for the std::mem::replace calls
+        let temp_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Drop Temp Buffer"),
+            size: 1,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        
+        let trail_map_buffer = std::mem::replace(&mut self.trail_map_buffer, temp_buffer.clone());
+        self.buffer_pool.return_buffer(
+            trail_map_buffer,
+            self.current_trail_map_size,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        );
+        
+        let gradient_buffer = std::mem::replace(&mut self.gradient_buffer, temp_buffer.clone());
+        self.buffer_pool.return_buffer(
+            gradient_buffer,
+            self.current_gradient_buffer_size,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        );
+        
+        let agent_buffer = std::mem::replace(&mut self.agent_buffer, temp_buffer);
+        self.buffer_pool.return_buffer(
+            agent_buffer,
+            self.current_agent_buffer_size,
+            BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+        );
+        
+        let stats = self.buffer_pool.memory_stats();
+        debug!("Buffer pool stats at drop: {:?}", stats);
+    }
 }
 
 // Helper functions that need to be accessible
@@ -457,9 +619,56 @@ fn create_agent_buffer(
         usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
         mapped_at_creation: true,
     });
+    initialize_agent_buffer(&agent_buffer, agent_count, physical_width, physical_height, settings);
+    agent_buffer
+}
+
+fn create_agent_buffer_pooled(
+    buffer_pool: &mut BufferPool,
+    device: &Device,
+    queue: &Queue,
+    agent_count: usize,
+    physical_width: u32,
+    physical_height: u32,
+    settings: &Settings,
+) -> Buffer {
+    let size = (agent_count * 4 * std::mem::size_of::<f32>()) as u64;
+    let usage = BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST;
+    
+    // Get buffer from pool
+    let agent_buffer = buffer_pool.get_buffer(device, Some("Agent Buffer"), size, usage);
+    
+    // We need to create a temporary buffer for initialization since pooled buffers
+    // are not mapped at creation
+    let temp_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Temp Agent Init Buffer"),
+        size,
+        usage: BufferUsages::COPY_SRC,
+        mapped_at_creation: true,
+    });
+    
+    initialize_agent_buffer(&temp_buffer, agent_count, physical_width, physical_height, settings);
+    
+    // Copy from temp buffer to the pooled buffer
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Agent Buffer Init Copy"),
+    });
+    encoder.copy_buffer_to_buffer(&temp_buffer, 0, &agent_buffer, 0, size);
+    queue.submit(Some(encoder.finish()));
+    
+    agent_buffer
+}
+
+fn initialize_agent_buffer(
+    buffer: &Buffer,
+    agent_count: usize,
+    physical_width: u32,
+    physical_height: u32,
+    settings: &Settings,
+) {
     // Initialize agents with random positions and angles
     {
-        let mut agent_data = agent_buffer.slice(..).get_mapped_range_mut();
+        let mut agent_data = buffer.slice(..).get_mapped_range_mut();
         let agent_f32: &mut [f32] = cast_slice_mut(&mut agent_data);
         for i in 0..agent_count {
             let offset = i * 4;
@@ -477,8 +686,7 @@ fn create_agent_buffer(
             agent_f32[offset + 3] = settings.agent_speed_min + rand::random::<f32>() * speed_range;
         }
     }
-    agent_buffer.unmap();
-    agent_buffer
+    buffer.unmap();
 }
 
 fn reset_trails(
@@ -544,6 +752,7 @@ fn reassign_agent_speeds_gpu(
     queue: &Queue,
     pipeline_manager: &PipelineManager,
     bind_group_manager: &BindGroupManager,
+    workgroup_config: &WorkgroupConfig,
     agent_count: usize,
 ) {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -559,7 +768,11 @@ fn reassign_agent_speeds_gpu(
         // Use the dedicated speed update pipeline
         cpass.set_pipeline(&pipeline_manager.speed_update_pipeline);
         cpass.set_bind_group(0, &bind_group_manager.compute_bind_group, &[]);
-        cpass.dispatch_workgroups((agent_count as u32).div_ceil(256).min(65535), 1, 1);
+        cpass.dispatch_workgroups(
+            workgroup_config.workgroups_1d(agent_count as u32),
+            1,
+            1,
+        );
     }
 
     queue.submit(Some(encoder.finish()));

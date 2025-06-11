@@ -71,6 +71,14 @@ pub struct Settings {
     ///
     /// Defaults to 0.0.
     pub gradient_angle: f32,
+    /// How often to update the diffusion (every N frames).
+    ///
+    /// Defaults to 1 (every frame). Higher values improve performance.
+    pub diffusion_frequency: u32,
+    /// How often to update the decay (every N frames).
+    ///
+    /// Defaults to 1 (every frame). Higher values improve performance.
+    pub decay_frequency: u32,
 }
 
 // Custom serialization for Range<f32>
@@ -138,13 +146,14 @@ impl Default for Settings {
             pheromone_decay_rate: 1.0,
             pheromone_deposition_rate: 1.0,
             pheromone_diffusion_rate: 1.0,
-            // Gradient defaults
             gradient_type: GradientType::Disabled,
             gradient_strength: 0.5,
             gradient_center_x: 0.5,
             gradient_center_y: 0.5,
             gradient_size: 0.3,
             gradient_angle: 0.0,
+            diffusion_frequency: 1,
+            decay_frequency: 1,
         }
     }
 }

@@ -309,6 +309,21 @@ pub fn init_preset_manager() -> PresetManager {
             ..Settings::default()
         },
     ));
+    preset_manager.add_preset(Preset::new(
+        "Cascades".to_string(),
+        Settings {
+            agent_jitter: 4.625_645_6,
+            agent_sensor_angle: 0.897_250_9,
+            agent_sensor_distance: 239.661_82,
+            agent_speed_max: 381.274_63,
+            agent_speed_min: 276.855_5,
+            agent_turn_rate: 0.733_131_2,
+            pheromone_decay_rate: 3.1,
+            pheromone_deposition_rate: 0.277_263_16,
+            pheromone_diffusion_rate: 0.660_592_73,
+            ..Settings::default()
+        },
+    ));
 
     // Capture all the built-in preset names we just added
     preset_manager.capture_built_in_presets();

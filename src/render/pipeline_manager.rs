@@ -1,4 +1,5 @@
 use crate::render::shader_manager::ShaderManager;
+use crate::workgroup_optimizer::WorkgroupConfig;
 use wgpu::{BindGroupLayout, ComputePipeline, Device, RenderPipeline};
 
 pub struct PipelineManager {
@@ -16,7 +17,10 @@ pub struct PipelineManager {
 }
 
 impl PipelineManager {
-    pub fn new(device: &Device, shader_manager: &ShaderManager) -> Self {
+    pub fn new(device: &Device, workgroup_config: &WorkgroupConfig) -> Self {
+        // Initialize shader manager with workgroup config
+        let shader_manager = ShaderManager::new(device, workgroup_config);
+
         let compute_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("Compute Bind Group Layout"),
